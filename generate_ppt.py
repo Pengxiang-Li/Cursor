@@ -12,21 +12,21 @@ from pptx.enum.shapes import MSO_SHAPE
 import copy
 
 # ============================================================
-# Color Palette (Dark professional theme)
+# Color Palette (Light professional theme)
 # ============================================================
-BG_DARK       = RGBColor(0x1B, 0x1B, 0x2F)  # Deep navy
-BG_CARD       = RGBColor(0x25, 0x25, 0x3D)  # Card background
-ACCENT_BLUE   = RGBColor(0x4E, 0x8C, 0xFF)  # Primary accent
-ACCENT_CYAN   = RGBColor(0x00, 0xD4, 0xAA)  # Secondary accent
-ACCENT_ORANGE = RGBColor(0xFF, 0x8C, 0x42)  # Warning/highlight
-ACCENT_PURPLE = RGBColor(0xA8, 0x78, 0xFF)  # Tertiary accent
-ACCENT_PINK   = RGBColor(0xFF, 0x6B, 0x9D)  # Quaternary accent
-TEXT_WHITE     = RGBColor(0xF0, 0xF0, 0xF5)  # Primary text
-TEXT_LIGHT     = RGBColor(0xB0, 0xB0, 0xC5)  # Secondary text
-TEXT_DIM       = RGBColor(0x80, 0x80, 0x9A)  # Dim text
-DIVIDER        = RGBColor(0x3A, 0x3A, 0x55)  # Divider lines
-GREEN          = RGBColor(0x4E, 0xCB, 0x71)  # Success
-RED            = RGBColor(0xFF, 0x5A, 0x5A)  # Error
+BG_DARK       = RGBColor(0xFA, 0xFA, 0xFC)  # Near-white background
+BG_CARD       = RGBColor(0xF0, 0xF2, 0xF7)  # Light gray card
+ACCENT_BLUE   = RGBColor(0x2D, 0x5B, 0xE3)  # Primary accent (deeper blue)
+ACCENT_CYAN   = RGBColor(0x00, 0x9B, 0x8D)  # Secondary accent (teal)
+ACCENT_ORANGE = RGBColor(0xE8, 0x6A, 0x17)  # Warning/highlight
+ACCENT_PURPLE = RGBColor(0x7C, 0x4D, 0xFF)  # Tertiary accent
+ACCENT_PINK   = RGBColor(0xD6, 0x33, 0x6C)  # Quaternary accent
+TEXT_WHITE     = RGBColor(0x1A, 0x1A, 0x2E)  # Primary text (dark)
+TEXT_LIGHT     = RGBColor(0x3D, 0x3D, 0x56)  # Secondary text
+TEXT_DIM       = RGBColor(0x78, 0x78, 0x96)  # Dim text
+DIVIDER        = RGBColor(0xD8, 0xDC, 0xE6)  # Divider lines
+GREEN          = RGBColor(0x1B, 0x9E, 0x4B)  # Success
+RED            = RGBColor(0xDC, 0x35, 0x45)  # Error
 
 SLIDE_WIDTH  = Inches(13.333)
 SLIDE_HEIGHT = Inches(7.5)
@@ -67,7 +67,8 @@ def add_rounded_rect(slide, left, top, width, height, fill_color=BG_CARD):
     shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
     shape.fill.solid()
     shape.fill.fore_color.rgb = fill_color
-    shape.line.fill.background()
+    shape.line.color.rgb = RGBColor(0xDE, 0xE1, 0xEB)
+    shape.line.width = Pt(1)
     return shape
 
 
@@ -113,7 +114,7 @@ def add_multi_text(slide, left, top, width, height, lines, default_size=Pt(14),
 
 
 def add_section_header(slide, number, title, subtitle=""):
-    add_bg(slide)
+    add_bg(slide, color=RGBColor(0xF5, 0xF7, 0xFB))
     add_shape(slide, Inches(0), Inches(0), Inches(0.08), SLIDE_HEIGHT, fill_color=ACCENT_BLUE)
 
     add_text_box(slide, Inches(0.8), Inches(1.5), Inches(2), Inches(1.2),
@@ -136,7 +137,7 @@ def add_page_number(slide, num, total):
 
 def add_top_bar(slide, title, subtitle=""):
     add_bg(slide)
-    add_shape(slide, Inches(0), Inches(0), SLIDE_WIDTH, Inches(0.9), fill_color=BG_CARD)
+    add_shape(slide, Inches(0), Inches(0), SLIDE_WIDTH, Inches(0.9), fill_color=RGBColor(0xFF, 0xFF, 0xFF))
     add_shape(slide, Inches(0), Inches(0.88), SLIDE_WIDTH, Inches(0.03), fill_color=ACCENT_BLUE)
     add_text_box(slide, Inches(0.6), Inches(0.15), Inches(8), Inches(0.6),
                  title, font_size=Pt(22), color=TEXT_WHITE, bold=True)
@@ -178,15 +179,17 @@ def make_table(slide, left, top, width, rows_data, col_widths, header_color=ACCE
             cell.text = cell_text
             for p in cell.text_frame.paragraphs:
                 p.font.size = Pt(11) if ri > 0 else Pt(12)
-                p.font.color.rgb = TEXT_WHITE if ri == 0 else TEXT_LIGHT
+                p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF) if ri == 0 else TEXT_LIGHT
                 p.font.bold = (ri == 0)
                 p.font.name = "Arial"
             if ri == 0:
                 cell.fill.solid()
-                cell.fill.fore_color.rgb = RGBColor(0x2D, 0x3A, 0x6D)
+                cell.fill.fore_color.rgb = RGBColor(0x2D, 0x5B, 0xE3)
+                for p in cell.text_frame.paragraphs:
+                    p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
             else:
                 cell.fill.solid()
-                cell.fill.fore_color.rgb = BG_CARD if ri % 2 == 1 else RGBColor(0x20, 0x20, 0x36)
+                cell.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF) if ri % 2 == 1 else RGBColor(0xF0, 0xF2, 0xF7)
     return table_shape
 
 
@@ -202,7 +205,7 @@ add_shape(slide, Inches(0), Inches(0), SLIDE_WIDTH, Inches(0.06), fill_color=ACC
 add_shape(slide, Inches(0), SLIDE_HEIGHT - Inches(0.06), SLIDE_WIDTH, Inches(0.06), fill_color=ACCENT_BLUE)
 
 add_multi_text(slide, Inches(1.5), Inches(1.8), Inches(10), Inches(4), [
-    {"text": "CUA 技术调研报告", "size": Pt(52), "color": TEXT_WHITE, "bold": True, "spacing": Pt(12)},
+    {"text": "CUA 技术调研报告", "size": Pt(52), "color": ACCENT_BLUE, "bold": True, "spacing": Pt(12)},
     {"text": "Computer Use Agent — 现有方法论深度分析", "size": Pt(24), "color": ACCENT_CYAN, "spacing": Pt(30)},
     {"text": "基于 Mobile-Agent-v3.5 / Mano / EvoCUA / UI-TARS-2 / AgentCPM / Computer-RL / DART-GUI",
      "size": Pt(14), "color": TEXT_LIGHT, "spacing": Pt(8)},
@@ -896,7 +899,7 @@ for title, desc, color, x in stages:
 for i in range(4):
     x = Inches(2.7) + Inches(2.6) * i
     add_text_box(slide, x, Inches(2.6), Inches(0.3), Inches(0.3),
-                 "→", font_size=Pt(20), color=TEXT_DIM, bold=True)
+                 "→", font_size=Pt(20), color=ACCENT_BLUE, bold=True)
 
 add_card(slide, Inches(0.3), Inches(5.0), Inches(12.5), Inches(1.8),
          "贯穿全流程的数据飞轮", [
@@ -919,9 +922,9 @@ add_shape(slide, Inches(0), Inches(0), SLIDE_WIDTH, Inches(0.06), fill_color=ACC
 add_shape(slide, Inches(0), SLIDE_HEIGHT - Inches(0.06), SLIDE_WIDTH, Inches(0.06), fill_color=ACCENT_BLUE)
 
 add_multi_text(slide, Inches(1.5), Inches(1.5), Inches(10), Inches(5), [
-    {"text": "Thank You", "size": Pt(52), "color": TEXT_WHITE, "bold": True, "spacing": Pt(16)},
+    {"text": "Thank You", "size": Pt(52), "color": ACCENT_BLUE, "bold": True, "spacing": Pt(16)},
     {"text": "CUA 技术调研报告", "size": Pt(24), "color": ACCENT_CYAN, "spacing": Pt(30)},
-    {"text": "核心结论", "size": Pt(18), "color": TEXT_LIGHT, "bold": True, "spacing": Pt(12)},
+    {"text": "核心结论", "size": Pt(18), "color": TEXT_WHITE, "bold": True, "spacing": Pt(12)},
     {"text": "1. 数据闭环驱动 > 模型架构创新", "size": Pt(15), "color": TEXT_LIGHT, "spacing": Pt(4)},
     {"text": "2. RL 是性能跃迁关键，瓶颈在环境与 Verifier 而非算法", "size": Pt(15), "color": TEXT_LIGHT, "spacing": Pt(4)},
     {"text": "3. Cold-Start 质量优先，Verifier 过滤 + 多 Teacher + 分层难度", "size": Pt(15), "color": TEXT_LIGHT, "spacing": Pt(4)},
