@@ -1,603 +1,570 @@
-# CUA 基座模型训练 — 落地执行计划
+# CUA RL 训练执行计划
 
-> **目标**：全平台 (Win/macOS/Linux) Desktop GUI 基座模型，基于 Qwen2.5-VL  
-> **核心原则**：数据闭环 > 模型架构；冷启动质量 > 数量；RL 瓶颈在环境和 Verifier  
-> **本文档定位**：可直接分配到人的执行清单，每个 Task 标注负责角色、交付物、依赖关系
-
----
-
-## 0. 角色定义
-
-| 角色 | 职责 |
-|------|------|
-| **Infra** | VM 集群、Docker 编排、A11y 工具链、截图/录制管线 |
-| **Data** | 开源数据清洗、自建数据管线、格式统一、质量控制 |
-| **Train** | 模型训练、超参调优、评测跑分 |
-| **Env** | Verifier 编写、RL 沙盒环境、任务池管理 |
-| **Research** | 动作空间设计、CoT 格式、训练策略实验 |
+> **前提**：已有不错的基础模型（SFT / Grounding 能力已具备），本计划聚焦 RL 阶段  
+> **核心参考**：EvoCUA（5K 轨迹冷启动 → 多轮 RFT → OSW 51 → DPO → 55）  
+> **辅助参考**：Computer-RL（Entropulse / API-GUI Paradigm）、DART-GUI（工程架构）  
+> **核心公式**：RL 上限 = min(沙盒规模, Verifier 质量, 任务多样性)
 
 ---
 
-## 1. Sprint 0: 基建 + Baseline（第 1-3 周）
+## 0. 当前状态与目标
 
-> 目标：跑通全链路最小闭环，拿到 zero-shot baseline 数据
+| 维度 | 现状 | 目标 |
+|------|------|------|
+| 基础模型 | SFT + Grounding 已完成 | — |
+| OSWorld SR | ? (先测 baseline) | >30%，争取 50+ |
+| RL Query 池 | 无 | 3000-5000 query + verifier |
+| RL 环境 | 无 | 2000-4000 并发 |
+| Verifier | 无 | 3000-5000 个，模型生成为主 |
 
-### 1.1 VM 环境搭建 [Infra]
+---
 
-| Task | 交付物 | 预计工时 |
-|------|--------|----------|
-| 部署 Ubuntu 24.04 GNOME VM × 10 | 可 SSH + VNC 的 VM 模板镜像 | 2d |
-| 部署 Windows 11 VM × 10 | 同上，预装 Office/VS Code/Chrome | 3d |
-| macOS VM × 5（AWS Mac Dedicated Host 或 Tart/Anka） | 同上，预装 Safari/Pages/Terminal | 3d |
-| VM 快照/恢复脚本（<10s 重置） | `reset_vm.sh` | 2d |
-| 截图服务（1080p PNG） | `screenshot_service.py`，REST API | 1d |
+## 1. 总体路线（EvoCUA 风格）
 
-### 1.2 A11y 工具链 [Infra]
+```
+已有 SFT 模型
+     │
+     ▼
+[Cold-start SFT] ← 少量高质量轨迹（~5K），格式对齐 + 关键步骤 upsampling
+     │
+     ▼
+[RFT Round 1] ← 模型 rollout → Verifier → 成功轨迹回收 → reject sampling SFT
+     │
+     ▼
+[RFT Round 2..N] ← 循环迭代，每轮扩任务池 / 提高难度
+     │              EvoCUA: 多轮 RFT → OSW 51
+     ▼
+[Offline DPO] ← 关键步骤级别偏好学习
+     │            EvoCUA: +4 分，到 55
+     ▼
+[Model Merge] ← 可选：多平台 vertical agents 参数插值
+```
 
-| 平台 | 工具 | Task | 交付物 |
-|------|------|------|--------|
-| Linux | `pyatspi2` + AT-SPI | 安装配置 + 写提取脚本 | `linux_a11y_extractor.py` |
-| Windows | `pywinauto` + UIA | 安装配置 + 写提取脚本 | `win_a11y_extractor.py` |
-| macOS | `macapptree` + AX API | 安装配置 + 写提取脚本 | `mac_a11y_extractor.py` |
-| 跨平台 | 统一输出格式 | 三平台 A11y → 统一 JSON schema | `a11y_schema.json` |
+**EvoCUA 关键数字**：
+- 冷启动 5K 轨迹，每 query 平均 4-5 条正确轨迹
+- 总计 ~5000 query + verifier，实际用 ~3000
+- Verifier 全部模型生成，无人工
+- RL 需 2000-4000 并发环境
+- 多轮 RFT → 51；减少数据也能 51；加 DPO → 55
 
-**验收标准**：在三个 OS 上分别打开 Firefox/Chrome、文件管理器、文本编辑器，能提取完整 A11y Tree 并输出统一 JSON。
+---
 
-### 1.3 动作录制/回放引擎 [Infra]
+## 2. Phase 0: RL 基建（第 1-3 周）
+
+> 最重要的事，也是最容易低估工时的事。EvoCUA 原话："最重视 scaling，沙盒还有 verifier"
+
+### 2.1 沙盒环境 [Infra, 2-3 人]
+
+| Task | 交付物 | 工时 |
+|------|--------|------|
+| Ubuntu 24.04 Docker 镜像（预装 Firefox, LibreOffice, VS Code, Terminal, Files, Settings, GIMP） | `Dockerfile` + 镜像 | 3d |
+| Windows 11 VM 快照模板（预装 Office, Chrome, VS Code, Explorer, Settings） | VM 模板 | 3d |
+| macOS VM 模板（如有资源，否则先 skip） | VM 模板 | 3d |
+| 快照/重置机制：Docker commit/restore 或 VM snapshot，**< 10s 重置** | `reset_env.sh` | 2d |
+| 任务初始状态预配置脚本（每个任务的起始文件/应用状态） | `task_init/` 目录 | 持续 |
+| 截图服务（1080p 采集 → 720p 输入） | `screenshot.py` | 1d |
+
+**先 Linux Docker 跑通，Windows VM 第二优先，macOS 第三。**
+
+### 2.2 分布式环境管理器 [Infra]
+
+> 参考 DART-GUI 四模块解耦异步架构
+
+```
+┌─────────────┐   ┌─────────────────┐   ┌──────────────┐   ┌───────────┐
+│ Env Cluster  │◀─▶│ Rollout Service  │──▶│ Data Manager │──▶│  Trainer  │
+│ K8s Docker   │   │ vLLM workers    │   │ MySQL/Redis  │   │ verl/FSDP │
+│ 2000-4000    │   │ 多 worker 推理   │   │ 轨迹/任务调度 │   │ GRPO 更新  │
+└─────────────┘   └─────────────────┘   └──────────────┘   └───────────┘
+```
+
+| Task | 交付物 | 工时 |
+|------|--------|------|
+| K8s 编排脚本，支持按需扩缩 Docker 实例 | `k8s/` | 5d |
+| Rollout Service：vLLM 部署，支持多 worker 并行推理 | `rollout_service/` | 3d |
+| Data Manager：MySQL 存轨迹 + 任务调度 + Experience Pool | `data_manager/` | 3d |
+| Trainer 对接：异步接收 filtered trajectories，做 GRPO 更新 | 对接 verl | 3d |
+| 端到端跑通：10 并发环境 + 1 worker rollout + 1 trainer | 集成测试 | 2d |
+
+**里程碑**：第 3 周末能在 10 并发环境上跑完一次 mini RL loop（rollout → verify → train → rollout）。
+
+### 2.3 Baseline 测试 [Train]
 
 | Task | 交付物 |
 |------|--------|
-| 键鼠事件录制（Linux: xdotool/ydotool, Win: pywinauto, macOS: cliclick） | `action_recorder.py` |
-| 事件回放 + 截图同步 | `action_replayer.py` |
-| 录制格式定义 | `action_schema.json` |
+| 当前 SFT 模型在 OSWorld 369 tasks 跑分 | baseline SR |
+| 当前 SFT 模型在 ScreenSpot-Pro 跑分 | baseline Acc |
+| 分析模型失败 case：grounding 错误 / 规划错误 / 格式错误 / 能力缺失 | 错误分布报告 |
 
-### 1.4 统一动作空间设计 [Research]
+**这个 baseline 非常重要**，决定了冷启动 SFT 是否还需要、以及 RL 的起点在哪。
 
-> 参考 Computer-RL 的 API-GUI Paradigm，这是当前最优方案
+---
+
+## 3. Phase 1: Query 池 + Verifier 构建（第 2-5 周，与 Phase 0 并行）
+
+> EvoCUA: ~5000 query + verifier，实际用 ~3000。Verifier 全部模型生成。
+> 这是 RL 的燃料，质量和数量直接决定上限。
+
+### 3.1 任务(Query)设计 [Data + Research]
+
+**目标**：3000-5000 个 query，覆盖多应用、多难度
+
+**来源 1：从 Benchmark 复用**
+
+| 来源 | 数量 | 备注 |
+|------|------|------|
+| OSWorld | 369 | 已有 verifier 框架，直接用 |
+| Windows Agent Arena | 154+ | 已有 eval 逻辑 |
+| AssistGUI | 100 | 专业软件任务 |
+| Computer-RL SpreadsheetBench/PPTC | 数百 | 表格/PPT 相关 |
+
+**来源 2：LLM 批量生成**
+
+| Step | 操作 |
+|------|------|
+| 1 | 定义应用-功能矩阵（见下表） |
+| 2 | 对每个 (应用, 功能) 对，用 LLM API 生成 20-50 个变体 query |
+| 3 | 按难度打标签：easy / medium / hard / expert |
+| 4 | 为每个 query 同时让 LLM 生成 verifier（见 3.2） |
+
+**应用-功能矩阵（Linux 优先，~30 应用 × ~10 功能）**：
+
+| 应用 | 核心功能 | 预期 query 数 |
+|------|----------|---------------|
+| Files (Nautilus) | 创建/移动/删除/重命名/搜索/权限 | 200 |
+| Firefox/Chrome | 导航/搜索/书签/下载/标签管理/表单填写 | 500 |
+| LibreOffice Writer | 排版/表格/插图/导出PDF/查找替换/页眉页脚 | 400 |
+| LibreOffice Calc | 公式/格式/筛选/排序/图表/数据验证 | 400 |
+| LibreOffice Impress | 幻灯片/布局/动画/母版/导出 | 200 |
+| Terminal | 文件操作/包管理/进程/网络/脚本 | 300 |
+| VS Code | 打开/编辑/搜索/安装扩展/终端/Git | 300 |
+| Settings (GNOME) | 网络/显示/声音/主题/快捷键 | 200 |
+| Text Editor | 编辑/保存/格式/搜索 | 100 |
+| GIMP | 裁剪/调色/图层/文字/导出 | 200 |
+| 跨应用工作流 | 浏览器→Writer/从终端整理到Calc/... | 200 |
+
+**来源 3：指令复杂化（参考 UI-TARS-2）**
+
+在已有 query 基础上用 LLM 做增广：
+- **Multi-Condition Obfuscation**：附加混淆条件（"如果当前是暗色主题则先切换到亮色主题"）
+- **Multi-Hop Chain**：多跳条件链（"先搜索 X，然后根据结果做 Y"）
+
+### 3.2 Verifier 构建 [Env + Data]
+
+> EvoCUA: Verifier 全部由模型生成和修改，无人工参与。
+
+**构建流程**：
 
 ```
-GUI Primitives（跨平台统一）:
-  click(x, y)
-  double_click(x, y)
-  right_click(x, y)
-  type_text(text)
-  hotkey(key1, key2, ...)
-  scroll(direction, amount)
-  drag(start_x, start_y, end_x, end_y)
-  wait(seconds)
-  done()
+1. LLM 生成 query 时，同时生成该 query 的 verifier 伪代码
+2. LLM 将伪代码转为可执行 Python 脚本
+3. 在沙盒中试运行 verifier（无 agent 操作 → 应返回 fail）
+4. 人工抽检 10-20% 确认 verifier 逻辑正确
+5. 有问题的回 LLM 修改
+```
 
-Application-Specific API（按活跃窗口动态加载）:
-  spreadsheet.set_cell(cell, value)
-  terminal.run_command(cmd)
-  browser.navigate(url)
-  ...
+**Verifier 分层策略**：
+
+| Tier | 方式 | 适用任务 | 预期覆盖 |
+|------|------|----------|----------|
+| **Tier 1: Rule-based** | 检查文件系统状态 / 应用配置 / 文档内容解析 | 文件管理、终端、设置、文本编辑 | ~40% query |
+| **Tier 2: Document Parse** | UNO API 解析文档结构 / Playwright 检查 DOM | Office 套件、浏览器 | ~30% query |
+| **Tier 3: LLM-as-Judge** | 任务指令 + 初始截图 + 最终截图 → 成功/失败 | 复杂视觉任务、跨应用 | ~30% query |
+
+**Tier 1 Verifier 示例**（文件管理）：
+
+```python
+def verify_task(env):
+    """Task: 在 ~/Documents 下创建名为 'report' 的文件夹，并在其中创建 notes.txt"""
+    dir_exists = os.path.isdir(os.path.expanduser("~/Documents/report"))
+    file_exists = os.path.isfile(os.path.expanduser("~/Documents/report/notes.txt"))
+    return 1.0 if (dir_exists and file_exists) else 0.0
+```
+
+**Tier 3 LLM-as-Judge Prompt 模板**：
+
+```
+你是一个 GUI 任务评判器。
+任务指令：{instruction}
+初始截图：{screenshot_before}
+最终截图：{screenshot_after}
+操作历史：{action_history}
+
+请判断任务是否成功完成。输出 JSON：{"success": true/false, "score": 0.0-1.0, "reason": "..."}
 ```
 
 **交付物**：
-- `action_space.py` — 所有 action 的 Python 定义 + 解析器 + 执行器
-- `api_registry.json` — 各应用 API 定义，推理时按活跃窗口注入 System Prompt
-- 设计文档：坐标归一化方案（推荐 [0, 1000]）、code action vs JSON action 对比实验设计
+- `verifier_generator.py` — 输入 query，LLM 自动生成 verifier
+- `verifier_runner.py` — 在沙盒中执行 verifier
+- `verifiers/` — 所有 verifier 脚本
+- `query_pool.json` — 全部 query + 元数据 + verifier 路径
 
-### 1.5 Zero-shot Baseline [Train]
+### 3.3 任务初始状态配置 [Env]
 
-| Task | 交付物 |
-|------|--------|
-| Qwen2.5-VL 7B / 72B 在 ScreenSpot-Pro 上跑分 | baseline 数据 |
-| Qwen2.5-VL 7B / 72B 在 OSWorld 50-task subset 上跑分 | baseline 数据 |
-| 整理 prompt template（参考 UI-TARS-1.5 / DART-GUI 格式） | `system_prompt.txt` |
+每个 query 需要一个确定的环境初始状态：
 
-### 1.6 统一数据格式定义 [Data]
-
-```json
-{
-  "task_id": "uuid",
-  "source": "os-genesis | agenttrek | template | human | opensource:{name}",
-  "platform": "windows | macos | linux",
-  "app_category": "office | browser | ide | file_manager | terminal | settings | ...",
-  "app_name": "LibreOffice Writer",
-  "task_instruction": "在文档中创建一个3行4列的表格并设置表头",
-  "difficulty": "easy | medium | hard | expert",
-  "trajectory": [
-    {
-      "step": 1,
-      "thought": "...",
-      "action_description": "...",
-      "screenshot_before": "path/to/001.png",
-      "screenshot_after": "path/to/002.png",
-      "a11y_tree_before": {},
-      "a11y_tree_after": {},
-      "action": {
-        "action_type": "click",
-        "coordinate": [320, 28],
-        "code": "click(320, 28)",
-        "element_id": "menu_table",
-        "element_role": "MenuItem",
-        "element_name": "Table"
-      }
-    }
-  ],
-  "metadata": {
-    "resolution": "1920x1080",
-    "os_version": "Ubuntu 24.04",
-    "language": "en",
-    "total_steps": 8,
-    "success": true,
-    "quality_score": 4.2
-  }
-}
-```
-
-**交付物**：`data_schema.json` + 格式转换脚本 `convert_{dataset_name}.py`
+| Task | 操作 |
+|------|------|
+| 为每个 query 写 `init_state.sh` | 创建所需文件/打开应用/设置初始内容 |
+| 将初始状态固化为 Docker snapshot 或 restore 脚本 | 重置后即进入该 query 的初始状态 |
+| LLM 辅助生成 init 脚本 | 与 query 和 verifier 一起生成 |
 
 ---
 
-## 2. Sprint 1: 开源数据清洗 + Grounding 训练（第 3-8 周）
+## 4. Phase 2: Cold-start SFT（第 4-5 周）
 
-### 2.1 开源数据下载与清洗 [Data]
+> EvoCUA 冷启动配比：50% 通用 + 35% 普通步骤 + **15% 关键步骤**
+> EvoCUA 冷启动仅 5K 轨迹。质量 >> 数量。
 
-**P0 — 立即下载**：
+### 4.1 判断是否需要 Cold-start
 
-| 数据集 | 用途 | 量级 | 处理要点 |
-|--------|------|------|----------|
-| OS-ATLAS | Grounding 核心 | 13M+ 元素 | 提取桌面部分（Win/Linux/macOS），按 OS 均衡采样 |
-| GroundCUA | Grounding | 3.56M 标注 / 56K 截图 | 直接可用，格式转换 |
-| Jedi | Grounding 增强 | 4M 合成 | 与真实数据混合使用 |
-| OpenCUA/AgentNet | SFT 轨迹核心 | 22,625 轨迹 / 3 OS | **已知问题**：与 Qwen pattern 不兼容，需 RoPE 对齐 + 格式转换 |
-| GUI-360° | SFT 轨迹 | 1.2M 步 | 仅 Windows，含 reasoning trace |
-| ScaleCUA | SFT 轨迹 | 大规模 / 6 OS | 提取桌面部分 |
+基于 Phase 0 的 baseline 结果决策：
 
-**P1 — 第二批**：
+| Baseline 情况 | 决策 |
+|---------------|------|
+| OSWorld >15%，格式正确率 >90% | 可以跳过 cold-start，直接进 RL |
+| OSWorld 5-15%，格式基本正确 | 轻量 cold-start（~2K 轨迹），主要对齐输出格式和 CoT |
+| OSWorld <5% 或格式问题严重 | 需要 cold-start（~5K 轨迹），对齐动作空间 + CoT + 基本能力 |
 
-| 数据集 | 用途 | 处理要点 |
-|--------|------|----------|
-| GUICourse | OCR + 基础 grounding | curriculum learning 早期使用 |
-| Mind2Web / Multimodal-Mind2Web | 浏览器操作 | 格式转换 |
-| GUIAct | GUI 交互动作 | 格式转换 |
-| AITW | 交互模式迁移 | ResNet-50 特征去重，保留约 40%（参考 AgentCPM） |
-| Rico | Mobile grounding 迁移 | resize 到 1080p |
-| OmniACT | 代码级动作 | PyAutoGUI 格式，适配动作空间 |
+### 4.2 Cold-start 数据准备（如需要）
 
-**清洗 pipeline**：
-1. 格式统一 → 自定义 schema
-2. ResNet-50 特征 + 余弦相似度去重（AITW 等冗余数据集）
-3. 规则过滤：截图模糊/黑屏/重复、坐标越界、轨迹连续性检查
-4. LLM API 对轨迹打分（完成度/效率/推理质量，0-5 分），保留 ≥ 3.5
-5. OpenCUA 特殊处理：RoPE 对齐 + 混合比例调优（参考 EvoCUA 经验）
+**数据量**：~5K 轨迹（参考 EvoCUA）
 
-**交付物**：各数据集的 `convert_xxx.py`、清洗后数据统计报告、HuggingFace datasets 格式存储
+**来源**：
+1. 用多个强模型（GPT-4o, Claude-3.5-Sonnet）作为 Teacher，在沙盒中执行 query，录制轨迹
+2. 仅保留 Verifier 验证通过的成功轨迹
+3. 同一 query 保留多条轨迹（EvoCUA: 每 query 4-5 条 → 更好的 policy space 覆盖）
 
-### 2.2 自建 A11y Grounding 数据 [Data + Infra]
-
-> 利用已搭好的 VM + A11y 工具链，零标注成本批量生产
-
-| Step | 操作 |
-|------|------|
-| 1 | 在 VM 上自动遍历目标应用（P0 应用列表见下） |
-| 2 | 每个界面提取截图 + A11y Tree |
-| 3 | 从 A11y Tree 中提取 (element_name, element_role, bounding_box) |
-| 4 | LLM API 生成 grounding 指令（"点击保存按钮" → 坐标） |
-| 5 | 质量过滤 |
-
-**P0 应用列表**（跨平台优先）：
-- 文件管理器（Files/Explorer/Finder）
-- 浏览器（Firefox/Chrome/Safari）
-- Office（LibreOffice Writer/Calc, MS Word/Excel, Pages/Numbers）
-- 终端（GNOME Terminal / Windows Terminal / Terminal.app）
-- VS Code
-- 系统设置
-- 文本编辑器
-
-**目标产出**：2-3M grounding pairs
-
-### 2.3 Hard Grounding Synthesis [Data]
-
-> 参考 Mobile-Agent-v3.5
-
-| 策略 | 方法 | 目标量 |
-|------|------|--------|
-| 多窗口场景合成 | 单窗口截图重组为多窗口高分辨率场景 | 200K |
-| 专业软件截图 | MLLM 渲染高难度 UI（密集元素、小按钮） | 100K |
-| Infeasible 负样本 | (截图, Query) 随机组合 + 多模型共识过滤 | 正负比 ~1:10 |
-
-### 2.4 Phase 1 训练：UI 感知预训练 [Train]
+**配比（EvoCUA 方案）**：
 
 ```
-数据规模: ~15-20M 样本
-数据配比:
-  OS-ATLAS (桌面)      40%    ~8M
-  GroundCUA            15%    ~3M
-  Jedi (合成)          15%    ~3M
-  自建 A11y 标注       15%    ~3M
-  Rico (mobile迁移)    10%    ~2M
-  GUICourse (OCR)       5%    ~1M
-
-训练任务:
-  UI Element Detection  30%
-  OCR                   20%
-  Layout Description    15%
-  Screen Summary        15%
-  Element Counting      10%
-  A11y Tree Prediction  10%
-
-混入通用 VLM 数据 ~30%（防止视觉模块退化，参考 AgentCPM 经验，Qwen 基座强可降到 25-30%）
-
-超参 (7B): LR 2e-5 cosine, BS 256, Epochs 2-3, 动态分辨率, Warmup 5%
-先训 7B 验证全流程，再扩展到其他尺寸
+通用数据（防止 mode collapse）       50%
+普通步骤轨迹                         35%
+关键步骤轨迹（upsampling）           15%
 ```
 
-### 2.5 Phase 2 训练：GUI Grounding [Train]
+**关键步骤识别**：
+- 不可逆操作（删除、提交、保存）
+- 分支决策点（条件判断后选择哪条路径）
+- 末步（save / submit / confirm）
+- 失败轨迹中第一个偏离正确路径的步骤
 
-```
-数据规模: ~10M 样本
-数据配比:
-  OS-ATLAS 桌面         35%    ~3.5M
-  GroundCUA             25%    ~2.5M
-  Jedi (合成)           20%    ~2M
-  自建 grounding        20%    ~2M
-
-训练任务:
-  Point Grounding       40%    指令 → 坐标
-  Box Grounding         30%    指令 → bbox
-  Referring Expression  20%    指令 → 描述 + 坐标
-  Multi-modal Grounding 10%    截图 + A11y → 坐标
-
-坐标归一化: [0, 1000]
-混入 ~10% 负样本（无匹配元素 → 拒答）
-Loss: L1 on coordinates + CE on text
-
-超参 (7B): LR 1e-5 cosine, BS 256, Epochs 2-3
-```
-
-**评测门槛**：ScreenSpot-Pro 进入 top-3 水平
-
----
-
-## 3. Sprint 2: SFT 轨迹数据 + 训练（第 6-12 周）
-
-> 与 Sprint 1 后半段并行启动
-
-### 3.1 自建轨迹数据 — 四条并行管线 [Data + Infra]
-
-**管线 A: 逆向任务合成（OS-Genesis 风格）**
-
-| Step | 操作 |
-|------|------|
-| 1 | Agent 在 VM 中自由探索 GUI（随机/启发式点击） |
-| 2 | 每步记录 (screenshot_before, a11y_before, action, screenshot_after, a11y_after) |
-| 3 | 将 (state_before, action, state_after) 送 LLM API 反向生成任务指令 |
-| 4 | 连续单步拼接为多步轨迹 |
-| 5 | LLM API 评分 (0-5)，过滤低分 |
-
-产出：每 VM 每天 ~1000-5000 步。10 台 VM × 30 天 → ~300K-1.5M 步
-
-**管线 B: 教程驱动合成（AgentTrek 风格）**
-
-| Step | 操作 |
-|------|------|
-| 1 | 爬取桌面教程（Microsoft Learn, Apple Support, ArchWiki, wikiHow, YouTube 字幕） |
-| 2 | LLM API 转为结构化步骤 |
-| 3 | VLM Agent 在 VM 中按教程执行，录制轨迹 |
-| 4 | VLM 评估结果与教程预期一致性 |
-
-产出：取决于教程数量，目标爬取数万篇教程 → 数十万步
-
-**管线 C: 任务模板批量生成**
-
-| Step | 操作 |
-|------|------|
-| 1 | 定义应用-功能矩阵（~50 应用 × ~10 功能） |
-| 2 | LLM API 按 (应用, 功能) 对生成 N 个变体任务 |
-| 3 | Agent 在 VM 中执行，录制轨迹 |
-| 4 | 自动验证任务完成 |
-
-产出：~50 × 10 × 20 = 10,000 基础任务 → ~100K 步
-
-**管线 D: 人机协作标注**
-
-| Step | 操作 |
-|------|------|
-| 1 | 人工执行复杂多步任务（跨应用工作流等长尾任务） |
-| 2 | 录屏 + 动作记录工具自动捕获 |
-| 3 | LLM API 生成 thought/reasoning 标注 |
-| 4 | 人工审核关键节点 |
-
-产出：~10K 高质量完整轨迹（每条 10-30 步）→ ~100K-300K 步
-
-### 3.2 CoT 格式标注 [Data]
-
-> 所有轨迹数据统一标注为三段式 CoT（参考 Mano，+2.8 提升）
+**CoT 格式**（Mano 验证 +2.8，必须用）：
 
 ```
 <think>
-[Observation] 当前界面：LibreOffice Writer，空白文档。
-[Memory] 任务要求创建会议纪要模板。
-[Progress] Step 1/6：输入标题。
-[Thought] 先输入标题文字。
+[Observation] 当前界面状态描述
+[Memory] 任务目标和已完成进度
+[Thought] 下一步推理
 </think>
-<summary>Type "会议纪要" at cursor position.</summary>
-<action>type_text(text="会议纪要")</action>
+<summary>一句话动作摘要</summary>
+<action>click(x=320, y=28)</action>
 ```
 
-**Mano 的关键发现**：在 Thought 和 Action 之间加一句 Action Description（summary），单项 +2.8 分。必须加。
-
-**历史帧策略**（Mano 实验最优）：保留前 2 帧截图 + 全部历史文本摘要。
-
-### 3.3 Phase 3 训练：动作预测 + 轨迹 SFT [Train]
+**训练配置**：
 
 ```
-数据规模: ~5M 步
-数据配比:
-  GUI-360° (Windows)     25%    ~1.25M steps
-  自建轨迹               25%    ~1.25M steps
-  ScaleCUA (跨平台)      20%    ~1M steps
-  OpenCUA/AgentNet       15%    跨平台（已对齐格式）
-  OmniACT (代码级)        5%    ~0.25M steps
-  Mind2Web + GUIAct      10%    ~0.5M steps
-
-训练任务:
-  Next Action Prediction           40%
-  Action + Thought Prediction      30%
-  Multi-step Planning (3-5步)      20%
-  Code Generation (统一动作空间)    10%
-
-混入通用对话/VQA 数据 25%（防 mode collapse）
-冷启动先用高质量子集 100K-200K 步（参考 Computer-RL 180K 步 cold-start）
-
-超参 (7B): LR 1e-5 cosine, BS 256, Epochs 2-3
+超参: LR 5e-6, BS 128, Epochs 2-3
+策略: 历史帧 = 前 2 帧截图 + 全部历史文本摘要（Mano 最优）
 ```
-
-### 3.4 Phase 4 训练：Agent SFT [Train]
-
-```
-数据:
-  自建高质量轨迹         50%    ~500K
-  GUI-360° (reasoning)   15%    ~150K
-  OpenCUA/AgentNet       10%    ~100K
-  NatureGAIA (自纠正)     5%    ~50K
-  通用对话/VQA           20%    ~200K
-
-关键步骤 upsampling 到 15-20%（参考 EvoCUA 冷启动配比：50% 通用 + 35% 普通 + 15% 关键步骤）
-
-关键步骤识别方法：
-  - Verifier 回溯：失败轨迹中第一个偏离正确路径的步骤
-  - 状态变化分析：前后截图差异大的步骤
-  - 末步强制标记（save/submit/confirm）
-
-超参 (7B): LR 5e-6 cosine, BS 128
-```
-
-**评测门槛**：OSWorld >15% SR
 
 ---
 
-## 4. Sprint 3: RL（第 10-20 周）
+## 5. Phase 3: 多轮 RFT（第 5-12 周）— 核心阶段
 
-> RL 是性能跃迁的关键，但瓶颈在环境和 Verifier
+> EvoCUA 的核心：多轮 RFT（Rejection Fine-Tuning），即 rollout → verify → 收集成功轨迹 → SFT → 循环
+> 多轮 RFT → OSW 51 分
 
-### 4.1 Verifier 体系构建 [Env]
+### 5.1 RFT Round 1
 
-**按应用构建优先级排序**（从易到难）：
-
-| 优先级 | 应用 | Verifier 方式 | 目标数量 |
-|--------|------|---------------|----------|
-| P0 | 文件管理 | 检查文件系统状态 | 1000 |
-| P0 | 文本编辑 | 读取文件内容比对 | 500 |
-| P0 | 终端 | 检查命令输出/文件变化 | 500 |
-| P1 | 浏览器 | URL + DOM 状态 (Playwright) | 1500 |
-| P1 | Office (表格/文档/PPT) | 解析文档结构 (UNO/COM API) | 2000 |
-| P1 | 系统设置 | 读取配置值 (gsettings/reg/defaults) | 500 |
-| P2 | VS Code / IDE | Extension API 检查 | 1000 |
-| P2 | 图像编辑 | 像素比对 | 500 |
-
-**Verifier 分层体系**：
-
-| Tier | 方式 | 精度 | 适用 |
-|------|------|------|------|
-| Tier 1: Rule-based | 文件系统/应用状态/文档结构/配置值 | 精确 | P0 应用 |
-| Tier 2: Screenshot-diff | 前后截图关键区域比对 + OCR | 中等 | 视觉变化明显的任务 |
-| Tier 3: LLM-as-Judge | 任务指令 + 初始/最终截图 + 操作历史 → 成功/失败 | 灵活 | 兜底 |
-| Tier 4: Generative ORM | 自训练 Outcome Reward Model | 可学习 | 后期 RL 用 |
-
-**目标**：5000-10000 个有 Verifier 的任务（参考 Computer-RL ~8000 个）
-
-**EvoCUA 经验**：Verifier 可以全部由模型生成和修改，无需人工。但建议 P0 应用的 Verifier 做人工审核。
-
-### 4.2 RL 沙盒扩容 [Infra]
-
-| Task | 交付物 |
-|------|--------|
-| Docker/VM 快照池，预配置应用 + 任务初始状态 | 快照模板 × N |
-| 快速重置 <10s | 重置脚本 |
-| 分布式环境管理器 | 参考 Computer-RL / DART-GUI 架构 |
-| 目标并发 2000-4000 | K8s 编排 |
-
-**DART-GUI 架构参考**（四模块解耦异步）：
-- **Env Cluster**：并行 Docker (K8s)
-- **Rollout Service**：vLLM 多 worker 推理
-- **Data Manager**：MySQL，管理轨迹/任务调度
-- **Trainer**：FSDP (verl)，异步接收 filtered trajectories
-
-### 4.3 RL 训练 [Train]
-
-**Phase 1: Step-level GRPO**
+**步骤**：
 
 ```
-算法: Step-level GRPO（无 Value Network，显存低）
+1. 当前模型在 Query 池中 rollout
+   - 每 query 采样 N 条轨迹（N=8-16，DART-GUI 动态调 N）
+   - 2000-4000 并发环境
+
+2. Verifier 验证每条轨迹
+   - 成功轨迹 → 进入正样本池
+   - 失败轨迹 → 进入负样本池（后续 DPO 用）
+
+3. 成功轨迹做 Reject Sampling SFT
+   - 仅用成功轨迹做一轮 SFT
+   - 混入部分通用数据防 collapse
+
+4. 评测 → 更新 checkpoint
+```
+
+**超参**：
+
+```
+Rollout:
+  - 每 query 采样 N=8-16 条轨迹
+  - 最大步数: 按任务历史成功轨迹动态设定（DART-GUI）
+  - 温度: 0.7-1.0（保证多样性）
+
+SFT (on successful rollouts):
+  - LR: 5e-6（Computer-RL Entropulse 参考）
+  - Epochs: 1
+  - 混入通用数据 30-50%
+```
+
+### 5.2 RFT Round 2..N — 迭代飞轮
+
+每轮迭代做以下事情：
+
+```
+Round K:
+  1. 用 Round K-1 的模型 rollout
+  2. Verifier 验证
+  3. 收集新的成功轨迹，与历史成功轨迹合并
+  4. SFT（或 GRPO）
+  5. 评测
+
+扩展策略（每轮可选一个或多个）:
+  a. 扩大 Query 池（加入新任务）
+  b. 提高难度（用 LLM 对简单 query 做条件复杂化）
+  c. 增加采样数 N
+  d. 加入更多 OS 的任务（Win → macOS）
+```
+
+**关键经验（EvoCUA）**：
+- 一个 query 多条轨迹 > 更多 query（同一任务的不同解法更有价值）
+- 减少数据量不一定掉分（质量 > 数量）
+- 多轮迭代比一次性大规模训练效果好
+
+### 5.3 可选升级：Step-level GRPO
+
+> 如果 RFT 效果触顶，可以切换到 Online RL
+
+```
+算法: Step-level GRPO（Computer-RL / DART-GUI）
+
 Reward:
-  R_task:       Rule-based Verifier 优先 → LLM-as-Judge 兜底
-  R_format:     代码可解析 = 0 / 不可解析 = -1 / 坐标越界 = -0.5
-  R_efficiency: -0.01 per step / -0.1 重复动作
+  R_task   = Verifier 结果（成功=1, 失败=0）
+  R_format = 代码可解析=0 / 不可解析=-1 / 坐标越界=-0.5
+  R_total  = R_task + R_format
 
 Credit assignment: 成功轨迹上所有格式正确的 step 获得 r=1
-KL: low_var_kl, β=0.0003
 
-预期: ~100-200 training steps 后触顶（entropy collapse）
+KL: β=0.0003
+
+预期: ~100-200 training steps 后 entropy collapse
 ```
 
-**Phase 2: Entropulse（Computer-RL 独创）**
+### 5.4 Entropulse（如遇 Entropy Collapse）
+
+> Computer-RL 独创，解决 RL 后期 entropy 下降问题
 
 ```
-收集 Phase 1 所有成功 rollout（~130K steps）
-用这些数据做一轮 SFT → 恢复 entropy
-LR: SFT 的 1/2（Computer-RL: 5e-6 vs 1e-5）
+触发条件: entropy 监控显示显著下降 + 性能不再提升
+
+操作:
+  1. 收集当前 RL 阶段所有成功 rollout
+  2. 用这些数据做一轮 SFT（恢复 entropy）
+  3. LR = 上一次 SFT 的 1/2（Computer-RL: 5e-6）
+  4. 加载新权重，继续 GRPO
+
+效果: 打破性能瓶颈，允许继续 RL
 ```
 
-**Phase 3: 继续 GRPO / 尝试 PPO**
+### 5.5 DART-GUI 自适应策略（推荐采用）
 
-```
-加载 Entropulse 权重，继续 GRPO
-如切换 PPO:
-  - 先冻结 policy 离线训练 value model（参考 UI-TARS-2 Value Pretraining）
-  - Decoupled GAE 解耦长序列 advantage 计算
-```
-
-**Phase 4: Offline DPO on 关键步骤（EvoCUA 方案）**
-
-```
-偏好对来源:
-  - 同一任务的成功 vs 失败轨迹
-  - 高效 vs 冗余轨迹（步数少 vs 步数多）
-  - 关键步骤级别的正确 vs 错误执行
-
-关键步骤 DPO 比全轨迹 DPO 更 sample-efficient（EvoCUA: +4 分）
-```
-
-### 4.4 数据飞轮 [Data + Train]
-
-```
-RL Rollout → Verifier 验证 → 数据回收 → 质量过滤 → 路由
-                                                    │
-  高质量成功轨迹 ──────────▶ SFT 数据集              (UI-TARS-2)
-  低质量/失败轨迹 ──────────▶ CT 数据集              (UI-TARS-2)
-  成功但中间有错 ───────────▶ LLM 修正 → SFT         (Mano)
-  成功 Rollout 集合 ────────▶ Entropulse SFT         (Computer-RL)
-```
-
-**评测门槛**：OSWorld >30% SR
+| 策略 | 作用 | 实现 |
+|------|------|------|
+| Dynamic Rollout Number | 成功率高的 query 减少采样，省算力给难 query | 根据实时成功率动态调 N |
+| Dynamic Trajectory Length | 每个 query 的最大步数基于历史成功轨迹长度 | 非全局固定 max_step |
+| High-Entropy Step Selection | 只对高熵 step 算 loss，跳过 trivial step | 节省计算 + 更有效学习 |
+| Experience Pool | 困难任务当前 batch 全败时，补历史正样本 | 保证正负样本共存 |
 
 ---
 
-## 5. Sprint 4: Scale + 融合（第 16-24 周）
+## 6. Phase 4: Offline DPO on 关键步骤（第 10-14 周）
 
-### 5.1 多尺寸训练 [Train]
+> EvoCUA: 关键步骤 DPO 比全轨迹 DPO 更 sample-efficient，+4 分（51 → 55）
 
-| 尺寸 | 策略 |
-|------|------|
-| 2B | 全参数训练 + 从 7B 蒸馏 |
-| 7B | 完整四阶段（主力实验模型） |
-| 72B | LoRA → 全参数 fine-tune |
-
-### 5.2 跨平台融合 [Train + Research]
-
-| 方案 | 方法 | 来源 | 建议 |
-|------|------|------|------|
-| A | 交替训练 Win→macOS→Linux 周期迭代 | MRPO (Mobile-Agent-v3.5) | 第二优先 |
-| B | 分别训练 vertical agents → 参数插值 θ_merge = Σα_k·θ_k | UI-TARS-2 | **先做这个（最安全）** |
-| C | 动态加权混合 batch 内混合 | Multi-task learning | 可选 |
-
-### 5.3 持续飞轮
-
-- RL 成功 → SFT 数据集
-- 失败 → LLM 修正 → SFT
-- 低质量 → CT 数据集
-- 每个 query 多条轨迹 > 更多 query（EvoCUA 确认）
-
----
-
-## 6. 评测体系
-
-### 6.1 Benchmark
-
-| 阶段 | Benchmark | 指标 | 频率 |
-|------|-----------|------|------|
-| Grounding | ScreenSpot, ScreenSpot-Pro | Grounding Acc | 每 checkpoint |
-| 感知 | UI-Vision, 自建 UI 测试集 | Element F1, OCR Acc | 每 checkpoint |
-| 端到端 | OSWorld (369 tasks, 跨 OS) | Task SR | 每阶段全量 |
-| Windows | Windows Agent Arena (154+) | Task SR | 每阶段 |
-| 专业软件 | AssistGUI (100 tasks) | Task SR | 每阶段 |
-| 综合 | MMBench-GUI | 多层级 | 每阶段 |
-
-### 6.2 持续评测节奏
-
-- **每 checkpoint**：ScreenSpot-Pro (~1.5h) + OSWorld 50-task subset (~4h) + 自建 smoke test 100 tasks × 3 OS (~2h)
-- **每阶段结束**：全量 OSWorld + WAA + AssistGUI + MMBench-GUI
-
----
-
-## 7. 风险与对策
-
-| 风险 | 对策 |
-|------|------|
-| macOS VM 成本高且许可复杂 | AWS Mac 预留实例 + Tart/Anka 虚拟化方案评估 |
-| A11y 跨 OS 覆盖率不一致 | 混合有/无 A11y 训练数据，推理时按需降级到纯视觉 |
-| 桌面 Verifier 构建困难 | P0 应用用 Rule-based，其余 LLM-as-Judge 兜底 |
-| RL entropy collapse | Entropulse（Computer-RL 方案）+ entropy 监控 |
-| OpenCUA 与 Qwen pattern 不兼容 | RoPE 对齐 + 混合比例调优（EvoCUA 经验） |
-| 统一动作空间设计可能有坑 | Sprint 0 就做 Code Action 可行性验证实验 |
-| 人力不足 | LLM 驱动为主，人工仅做 in-policy 标注 + 质检 |
-
----
-
-## 8. 立即可执行的 Week 1 任务清单
-
-> 以下是第一周每个角色应该立刻开始做的事情
-
-### Infra（2-3 人）
-- [ ] 采购/申请 VM 资源（Ubuntu × 10, Win × 10, macOS × 5）
-- [ ] Ubuntu VM 模板镜像制作（预装 Firefox, LibreOffice, VS Code, GIMP, pyatspi2, xdotool）
-- [ ] 写 `linux_a11y_extractor.py`，在 Ubuntu 上跑通 Files + Firefox + LibreOffice 的 A11y Tree 提取
-- [ ] 截图服务 `screenshot_service.py` 基础版
-
-### Data（2-3 人）
-- [ ] 下载 OS-ATLAS, GroundCUA, Jedi 数据集
-- [ ] 下载 OpenCUA/AgentNet, GUI-360°, ScaleCUA 数据集
-- [ ] 开始写格式转换脚本 `convert_os_atlas.py`, `convert_groundcua.py`
-- [ ] 定义 `data_schema.json` 终稿
-
-### Train（1-2 人）
-- [ ] 部署 Qwen2.5-VL-7B 推理环境
-- [ ] 跑 ScreenSpot-Pro zero-shot baseline
-- [ ] 跑 OSWorld 50-task subset zero-shot baseline
-- [ ] 整理 System Prompt 模板
-
-### Research（1 人）
-- [ ] 完成统一动作空间设计文档（API-GUI Paradigm）
-- [ ] 设计 CoT 三段式格式（Thought + Action Description + Action）
-- [ ] 设计坐标归一化方案对比实验
-
----
-
-## 9. 关键技术决策备忘
-
-| 决策点 | 推荐方案 | 理由 |
-|--------|----------|------|
-| Action 输出格式 | Python Code（非 JSON） | 支持组合操作、条件判断；复用 LLM 代码能力（Computer-RL） |
-| 坐标系 | 归一化 [0, 1000] | 跨分辨率泛化 |
-| 输入分辨率 | 1920×1080 采集 → 1280×720 输入 | 平衡细节与效率（Computer-RL 方案） |
-| A11y 使用策略 | 训练时混合有/无 A11y，推理时按需 | 增强鲁棒性（Computer-RL 纯视觉也可行） |
-| CoT 格式 | Thought + Action Desp + Action 三段式 | Mano: 单项 +2.8 分 |
-| 历史帧 | 前 2 帧截图 + 全部历史文本摘要 | Mano 实验最优 |
-| RL 算法 | Step-level GRPO → Entropulse → GRPO → DPO | Computer-RL + EvoCUA 组合 |
-| 跨平台融合 | 先 B（参数插值），再试 A（MRPO） | UI-TARS-2 最安全 |
-| 基座模型 | Qwen2.5-VL-7B（主力实验），后扩展 | 社区生态好，视觉能力强 |
-| 通用数据混合比例 | 25-30% | Qwen 基座强于 MiniCPM，可低于 AgentCPM 的 50% |
-
----
-
-## 10. Timeline 总览
+### 6.1 偏好对构造
 
 ```
-Week  1-3   Sprint 0: 基建 + Baseline
-Week  3-8   Sprint 1: 开源数据清洗 + Grounding 训练 (Phase 1 & 2)
-Week  6-12  Sprint 2: SFT 轨迹数据 + 训练 (Phase 3 & 4)
-Week 10-20  Sprint 3: RL (Verifier + 沙盒 + GRPO + Entropulse + DPO)
-Week 16-24  Sprint 4: Scale + 跨平台融合
+来源 1: 同一 query 的成功 vs 失败轨迹
+  - 正例: 成功轨迹的关键步骤
+  - 负例: 失败轨迹中第一个偏离正确路径的步骤
+
+来源 2: 同一 query 的高效 vs 冗余轨迹
+  - 正例: 步数少的成功轨迹
+  - 负例: 步数多但最终成功的轨迹
+
+来源 3: 关键步骤精确 vs 错误
+  - 正例: grounding 准确的关键步骤
+  - 负例: grounding 偏移但因后续纠正仍成功的步骤
+```
+
+### 6.2 DPO 训练
+
+```
+数据: 关键步骤级别偏好对（非全轨迹）
+超参: LR 1e-6, β=0.1, Epochs 1-2
+```
+
+### 6.3 Model Merge（可选）
+
+> EvoCUA 提到 model merge 有效
+
+```
+策略: 分别训练针对不同 OS / 应用类型的 vertical agents
+融合: θ_merge = Σα_k · θ_k（参考 UI-TARS-2）
+
+例如:
+  θ_linux  = RL on Linux tasks
+  θ_win    = RL on Windows tasks
+  θ_merge  = 0.5 * θ_linux + 0.5 * θ_win
+```
+
+---
+
+## 7. 完整迭代循环
+
+```
+                    ┌─────────────────────────────┐
+                    │                             │
+                    ▼                             │
+              ┌──────────┐                        │
+              │  Rollout  │  2000-4000 并发        │
+              │  (vLLM)   │                        │
+              └────┬─────┘                        │
+                   │                              │
+              ┌────▼─────┐                        │
+              │ Verifier  │  Rule / Parse / LLM    │
+              └────┬─────┘                        │
+                   │                              │
+          ┌────────┼────────┐                     │
+          ▼        ▼        ▼                     │
+      成功轨迹  失败轨迹  部分成功                  │
+          │        │        │                     │
+          ▼        ▼        ▼                     │
+      [RFT SFT]  [DPO负例]  [LLM修正→SFT]         │
+          │        │                              │
+          ▼        ▼                              │
+      ┌──────────────┐                            │
+      │   Train       │  GRPO / RFT / DPO         │
+      │   (verl)      │                            │
+      └──────┬───────┘                            │
+             │                                    │
+             ▼                                    │
+       ┌──────────┐    不够好                      │
+       │  评测     │ ──────────────────────────────┘
+       │ OSWorld   │
+       └──────┬───┘
+              │ 达标
+              ▼
+          发布模型
+```
+
+---
+
+## 8. 评测节奏
+
+| 时机 | 评测内容 | 耗时 |
+|------|----------|------|
+| 每轮 RFT 后 | OSWorld 50-task subset + 自建 smoke test 100 tasks | ~4h |
+| 每 2-3 轮 RFT | OSWorld 全量 369 tasks | ~12h |
+| Phase 切换时 | OSWorld + ScreenSpot-Pro + WAA + AssistGUI | ~24h |
+
+**目标里程碑**：
+
+| 阶段 | 预期 OSWorld SR |
+|------|-----------------|
+| Baseline (当前 SFT 模型) | ? |
+| Cold-start SFT 后 | baseline + 3-5 |
+| RFT Round 3 后 | 25-35 |
+| RFT Round 5+ 后 | 40-50 |
+| DPO 后 | 45-55 |
+
+---
+
+## 9. 团队分工与 Timeline
+
+### 角色
+
+| 角色 | 职责 | 人数 |
+|------|------|------|
+| **Infra** | 沙盒环境、K8s 编排、分布式管理器、截图服务 | 2-3 |
+| **Env** | Query 设计、Verifier 编写、任务初始状态配置 | 2-3 |
+| **Train** | 模型训练、RFT 循环、DPO、评测 | 2 |
+| **Research** | 数据分析、错误归因、策略调优 | 1 |
+
+### Timeline
+
+```
+Week 1-3    Phase 0: 沙盒基建 + baseline + 分布式架构
+            ├── [Infra] Docker 镜像 + K8s + 环境管理器
+            ├── [Train] 跑 baseline, 分析失败 case
+            └── [Env]   开始 Query 设计
+
+Week 2-5    Phase 1: Query 池 + Verifier（与 Phase 0 并行）
+            ├── [Env]   3000-5000 query + verifier
+            ├── [Env]   任务初始状态脚本
+            └── [Infra] 扩容到 100+ 并发，联调 rollout pipeline
+
+Week 4-5    Phase 2: Cold-start SFT（如需要）
+            ├── [Train] 强模型 teacher rollout → 收集 5K 轨迹
+            └── [Train] Cold-start SFT 训练
+
+Week 5-12   Phase 3: 多轮 RFT（核心）
+            ├── [Infra] 扩容到 2000-4000 并发
+            ├── [Train] RFT Round 1, 2, 3, ... N
+            ├── [Env]   持续扩展 Query 池 + 新 Verifier
+            ├── [Research] 每轮分析失败 case, 调整策略
+            └── [Train] 如遇 entropy collapse → Entropulse
+
+Week 10-14  Phase 4: DPO + Merge
+            ├── [Train] 关键步骤 DPO
+            ├── [Train] Model merge 实验
+            └── [全员]  最终评测 + 发布
 
 里程碑:
-  Week 3:  三平台 A11y 工具链跑通 + Zero-shot baseline
-  Week 8:  ScreenSpot-Pro top-3 水平
-  Week 12: OSWorld >15% SR (SFT)
-  Week 20: OSWorld >30% SR (RL)
-  Week 24: 多尺寸模型 + 跨平台融合完成
+  Week 3:  10 并发 mini RL loop 跑通
+  Week 5:  100+ 并发 + 1000 query with verifier
+  Week 8:  2000+ 并发 + 3000 query, RFT Round 3 完成, OSW >30
+  Week 12: 多轮 RFT 收敛, OSW >45
+  Week 14: DPO 完成, OSW >50
 ```
+
+---
+
+## 10. Week 1 立即开工清单
+
+### Infra
+- [ ] Ubuntu 24.04 Docker 镜像制作（预装 P0 应用 + 截图服务 + A11y 工具）
+- [ ] 写 `reset_env.sh`（< 10s 重置到 clean state）
+- [ ] 调研 K8s 方案（本地集群 or 云），出技术选型
+- [ ] 部署 vLLM，能跑当前 SFT 模型推理
+
+### Env
+- [ ] 定义应用-功能矩阵终稿
+- [ ] 写 `verifier_generator.py` — 输入 query 描述，LLM 输出 (query, verifier, init_state) 三元组
+- [ ] 先手写 50 个 query + verifier（文件管理 + 终端），作为 LLM 生成的 few-shot 示例和质量标杆
+- [ ] 开始批量生成，目标 Week 1 结束有 500+ query
+
+### Train
+- [ ] 跑 OSWorld 全量 baseline（369 tasks）
+- [ ] 分析失败 case 分布（输出错误类型占比报告）
+- [ ] 确定是否需要 cold-start SFT，制定 cold-start 数据方案
+
+### Research
+- [ ] 精读 EvoCUA、DART-GUI 论文细节，整理可复现的工程 checklist
+- [ ] 设计 entropy 监控方案（什么指标、什么阈值触发 Entropulse）
+- [ ] 设计关键步骤识别算法
+
+---
+
+## 11. 关键风险与对策
+
+| 风险 | 影响 | 对策 |
+|------|------|------|
+| 并发环境扩容慢 | RL scaling 受限 | 先用 Linux Docker（扩容快），Win/macOS 逐步加 |
+| Verifier 质量不够（假阳/假阴） | RL 信号有噪声，模型学歪 | P0 应用人工抽检 20%；LLM-as-Judge 做 double-check |
+| Entropy collapse | RL 过拟合，停止提升 | 监控 entropy，及时 Entropulse |
+| Query 池多样性不足 | 模型过拟合到特定任务模式 | 持续扩展 query 池 + 指令复杂化 |
+| 当前模型 grounding 不够 | RL 探索困难 | 如果 baseline 显示 grounding 弱，先补一轮 grounding SFT |
+| macOS/Windows 环境成本 | 跨平台覆盖不足 | 先 all-in Linux，后续逐步加平台 |
