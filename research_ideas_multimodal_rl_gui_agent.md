@@ -1,307 +1,354 @@
-# 多模态大模型 RL × GUI Agent 研究构想
+# 多模态大模型 RL 研究构想（发散版）
 
-> 基于 Pengxiang Li 的研究背景（DART, SPORT, MAT, Chain-of-Focus, TongUI, MacOS Agent）以及 OpenClaw-RL 框架，结合组内 GUI Agent 垂类基础模型训练方向，提出以下研究构想。
+> 面向顶会（NeurIPS / ICML / ICLR / CVPR）的多模态 RL 研究方向，不局限于 GUI Agent，涵盖更广泛的多模态 RL 前沿问题。
 
 ---
 
-## Idea 1: GUI-Claw — 基于视觉后见之明的 On-Policy Distillation 用于 GUI Agent RL
+## Idea 1: Visual Verifiable Rewards — 打通视觉领域的 RLVR
 
-### 核心动机
+### 核心洞察
 
-OpenClaw-RL 的核心创新之一是 Hindsight-Guided On-Policy Distillation (OPD)：利用用户的文本反馈（纠正、补充）作为 "后见之明"，构建增强上下文让 teacher model 生成 token 级优势信号。然而，在 GUI 场景中，最丰富的反馈信号不是文本，而是 **截图状态变化（visual state transition）**。
+DeepSeek-R1 在文本领域的成功建立在一个关键前提上：**数学和代码具有天然的可验证奖励（verifiable reward）**——答案对就是对、错就是错。这使得纯 RL 训练（无需人工标注）成为可能，并催生了 "aha moment" 等涌现能力。
 
-当 agent 执行了一个错误动作后，**下一帧截图本身就包含了大量的 "该怎么做" 的信息**：比如打开了错误的对话框（说明应该点别的按钮）、滚动到了错误的位置（说明目标在另一个方向）、输入框出现了报错提示（说明输入内容有误）。这些视觉反馈比纯粹的 "成功/失败" 标量奖励要丰富得多。
+然而，视觉领域一直缺乏这样的可验证信号。现有的多模态 RL 工作（Vision-R1、Perception-R1 等）要么局限于有标准答案的 VQA/数学题，要么依赖 LLM-as-Judge（贵且不稳定）。**视觉世界中大量的任务（图像编辑、设计排版、UI 操作、视频生成）没有简单的 "答案对错" 判断。**
+
+**核心问题：能否为视觉任务系统性地构造 verifiable reward，从而在视觉领域复现 R1 式的纯 RL 训练突破？**
 
 ### 技术方案
 
-1. **Visual Hint Extraction**：设计一个 VLM-based hint extractor，输入 (screenshot_t, action_t, screenshot_{t+1}, task_instruction)，输出结构化的 "visual hindsight hint"：
-   - "点击位置错误，目标按钮在右上角的 Save 按钮而非左下角的 Cancel"
-   - "当前页面需要先滚动到底部才能看到目标元素"
-   
-2. **Enhanced Teacher Context**：将提取的 visual hint 拼接到原始上下文中，构建 s_enhanced = (screenshot_t, task, hint)，让 teacher model 在这个增强上下文下生成 "正确" 的动作分布。
+1. **Visual Verifiable Reward Taxonomy**——按可验证性对视觉任务分类：
+   - **Level 1: Pixel-Verifiable**——计数（图中有几个人？→ 数值对错）、OCR（读出文字 → 精确匹配）、颜色识别（红色还是蓝色？→ 离散答案）
+   - **Level 2: Spatially-Verifiable**——空间关系（A 在 B 左边吗？→ IoU/坐标验证）、物体检测（bounding box 与 GT 比较）、指示代词消解
+   - **Level 3: Semantically-Verifiable**——场景图一致性（生成的场景图是否与图像匹配 → 图结构比较）、视觉推理链条逻辑一致性（每步推理是否与视觉证据一致 → 可回溯验证）
+   - **Level 4: Functionally-Verifiable**——代码/工具执行（"写一段 matplotlib 代码画出这张图" → 渲染并比较）、GUI 操作（执行后截图比较）、图像编辑指令（执行编辑并验证差异）
 
-3. **Token-Level Visual Advantage**：计算 A_t = log π_teacher(a_t | s_enhanced) - log π_θ(a_t | s_t)，同时对 action 的不同维度（action_type, coordinates, text_input）分别计算优势，实现细粒度的学习信号。
+2. **Composite Reward Construction**：
+   - 将复杂视觉任务分解为多个 sub-task，每个 sub-task 使用对应 level 的 verifiable reward
+   - 例如：chart understanding = OCR (L1) + spatial relation (L2) + data reasoning (L3)
+   - 组合奖励 = Σ w_i × verifiable_reward_i，权重可学习或自适应
 
-4. **与 DART 框架集成**：利用 DART 的异步解耦架构，将 hint extraction 和 teacher inference 作为独立的异步模块，不阻塞 rollout 和 training。
+3. **Visual RLVR Training Pipeline**：
+   - 从大规模图文数据中自动挖掘可验证的 visual QA pairs
+   - 设计 verification programs（不是人工标注，而是自动化验证脚本）
+   - 用 GRPO/PPO 训练 VLM，只用 verifiable reward，不用人工标注
 
-### 创新点
-- 首次将 OPD 范式从文本交互扩展到多模态 GUI 交互
-- Visual state transition 作为天然的 hindsight signal，无需用户显式反馈
-- Token 级多维度优势（动作类型 + 坐标 + 文本）比标量奖励提供更丰富的学习信号
-- 与 DART/OpenClaw 的异步架构天然兼容
+4. **Verifiable Visual CoT**：
+   - 训练 VLM 生成 "可验证的视觉推理链"——每一步推理都关联到可验证的视觉证据
+   - 类比：数学 CoT 中每步可以验证算术正确性 → 视觉 CoT 中每步可以验证 grounding 正确性
+   - 用 visual grounding accuracy 作为 step-level verifiable reward
 
-### 实验设计
-- 基线：DART (GRPO, scalar reward), ARPO (experience replay), GUI-R1 (GRPO)
-- 基座模型：TongUI-7B / Qwen2.5-VL-7B
-- Benchmark：OSWorld, AndroidWorld, WebArena
-- 消融：hint quality, teacher model size, advantage granularity
+### 为什么能中顶会
+- **高度 timely**：R1/RLVR 是 2025-2026 最热的话题，但视觉领域的 RLVR 几乎空白
+- **方法论贡献**：提出了视觉 verifiable reward 的系统性分类学和构造方法
+- **与 Perception-R1、Ground-R1、ViGoRL 形成差异**：它们是具体任务上的 RL，本文是关于 "reward 从哪来" 的元问题
+- **可验证性 scaling**：展示随着 verifiable reward 的 level 提升，VLM 的涌现能力如何变化
+
+### 目标会议：NeurIPS / ICML (Spotlight/Oral 潜力)
 
 ---
 
-## Idea 2: GUI WorldModel-Guided RL — 用 GUI 世界模型加速 Agent RL 训练
+## Idea 2: Think-Before-You-Act — 多模态 Agent 的自适应推理深度分配
 
-### 核心动机
+### 核心洞察
 
-GUI Agent RL 的最大瓶颈是 **环境交互效率低**。DART 的实验显示，即使采用全异步架构，environment utilization 也只能从 12.2% 提升到 67.7%。每一步交互都需要真实桌面环境执行动作、渲染截图，这是不可压缩的物理延迟。
+"Thinking Fast and Slow"（Kahneman）的 System 1/System 2 框架已被引入 LLM（CogRouter、Dualformer 等），但几乎所有工作都聚焦于**纯文本推理任务**。
 
-如果我们能训练一个 **GUI World Model**——给定当前截图和动作，预测下一步截图和状态——就可以在"想象空间"中进行大量廉价的 rollout，大幅降低对真实环境的依赖。
+多模态 Agent 面临一个更复杂的计算分配问题：**不仅要决定 "想多深"（推理步数），还要决定 "看多细"（视觉分辨率/区域）和 "用什么工具"（直接回答 vs. 调用代码 vs. 调用搜索引擎）**。这三个维度的联合优化是文本 System 1/2 工作完全没有触及的。
+
+**核心问题：能否通过 RL 训练一个多模态 Agent，让它自主决定每个问题的最优计算策略——看多细、想多深、用什么工具——同时优化准确率和效率？**
 
 ### 技术方案
 
-1. **GUI World Model 训练**：
-   - 数据来源：TongUI 的 GUI-Net 数据集（143K+ 轨迹）+ DART 的 online rollout 数据
-   - 模型架构：基于 video diffusion 或 autoregressive visual token prediction
-   - 输入：(screenshot_t, action_t)  →  输出：screenshot_{t+1} (或其 latent representation)
-   - 额外预测头：task completion probability, UI element state changes
+1. **三维计算预算空间**：
+   - **Visual Depth（看多细）**: low-res quick glance → region crop → high-res zoom → multi-crop comparison
+   - **Reasoning Depth（想多深）**: direct answer → brief CoT → long CoT → multi-round self-verification
+   - **Tool Depth（用什么）**: no tool → calculator → code execution → web search → multi-tool composition
 
-2. **Dyna-Style RL Training**：
-   - Real rollout：在真实 GUI 环境中执行，收集 (s, a, s', r) 四元组
-   - Imagined rollout：用 World Model 生成虚拟轨迹，在"梦境"中进行 GRPO 训练
-   - 混合训练：按照 model confidence 动态调整 real/imagined rollout 的比例
-   - World Model 的预测不确定性作为 exploration bonus
+2. **Meta-Controller via RL**：
+   - 输入：(image, question, current_confidence)
+   - 输出：三维计算分配决策 (visual_depth, reasoning_depth, tool_depth)
+   - RL Reward：accuracy_reward - λ × compute_cost（FLOPs 或 wall-clock time 的加权惩罚）
+   - 训练：两阶段——先 SFT 学习基本能力，再 RL 学习最优分配策略
 
-3. **Progressive Fidelity**：
-   - 初期：低分辨率预测 + semantic state prediction（快速、低成本）
-   - 后期：高分辨率图像预测（精确但昂贵）
-   - 根据 agent 的学习阶段自适应调整 world model 的 fidelity
+3. **Adaptive Execution Engine**：
+   - 根据 meta-controller 的决策，动态构造推理 pipeline
+   - 支持 early-exit：如果低深度已获得高置信度，立即返回
+   - 支持 escalation：如果当前深度不够，自动升级到更深的策略
+   - 所有过程在统一的 VLM 中完成（不是多个独立模型）
 
-4. **Outcome Verification**：
-   - 用 World Model 的预测 rollout 来做 "思维链式" 的 look-ahead planning
-   - 在执行前先模拟多步，选择预期完成率最高的动作序列
+4. **Self-Reflective Confidence Estimation**：
+   - 训练 VLM 预测自身答案的置信度
+   - 置信度作为 meta-controller 的关键输入
+   - 用 RL 校准置信度：过度自信受惩罚（答案错但高置信），适度不确定受奖励（正确触发 escalation）
 
-### 创新点
-- GUI 领域第一个系统性的 World Model + RL 训练框架
-- 解决 GUI RL 的核心瓶颈：环境交互效率
-- Progressive fidelity 平衡了 world model 的训练成本和预测质量
-- World model 不确定性天然提供 exploration signal
+### 为什么能中顶会
+- **新维度**：现有 "fast/slow thinking" 工作只考虑推理深度，本文首次将视觉深度和工具深度纳入统一优化
+- **实际意义**：多模态 Agent 部署中计算成本是核心约束，本文直接优化 accuracy-efficiency Pareto
+- **RL 的自然应用**：三维计算分配是 sequential decision making 问题，RL 是最自然的训练范式
+- **涌现行为分析**：可以展示 agent 学习到的 "什么时候该仔细看、什么时候该深入想" 的涌现策略
 
-### 实验设计
-- 对比：纯 real rollout (DART) vs. 纯 imagined vs. Dyna-style 混合
-- 指标：相同计算预算下的 task success rate, wall-clock time to convergence
-- 分析：world model prediction accuracy vs. RL performance
-- Benchmark：OSWorld（复杂长序列任务最能体现加速效果）
+### 目标会议：ICLR / NeurIPS
 
 ---
 
-## Idea 3: Self-Evolving GUI Agent — 自主任务发现与持续进化
+## Idea 3: Multimodal RL Scaling Laws — 多模态 RL 的 Compute-Optimal 训练
 
-### 核心动机
+### 核心洞察
 
-当前 GUI Agent RL 面临一个根本问题：**训练任务的供给瓶颈**。OSWorld 只有约 369 个任务，AndroidWorld 也类似规模。Agent 在有限任务上反复训练容易过拟合，泛化能力受限。
+文本 LLM 的 RL scaling law 已有初步研究（IsoCompute Playbook，2026 年 3 月），但 **多模态模型的 RL scaling 完全是未知领域**。VLM 的 RL 训练引入了文本 LLM 不存在的新维度：
 
-TongUI 已经展示了从网络教程大规模构造训练数据的能力（143K 轨迹），但这些数据是 SFT 数据，不是 RL 可以直接用的交互式任务。OpenClaw-RL 展示了从任何交互中学习的能力。
+- **视觉编码成本**：每张图产生数百到数千个 visual tokens，这个成本在 rollout 中被反复支付
+- **视觉分辨率 vs. RL 性能**：更高分辨率的图像 → 更多 visual tokens → 更贵的 rollout → 但可能更好的 grounding → 更好的 RL 信号？
+- **模态交互**：RL 同时优化视觉理解和语言推理，两者的 scaling 行为是否不同？
+- **Rollout 中的视觉多样性**：同一任务的多次 rollout 在文本 LLM 中只是采样不同 token 序列，但在多模态 Agent 中可能涉及不同的视觉状态轨迹
 
-**如果 agent 能自主发现、构造、验证新的 GUI 任务，并在这些任务上进行 RL 训练，就能实现真正的自我进化。**
+**核心问题：给定固定的计算预算，多模态 RL 训练的最优配置是什么？应该如何分配计算到视觉编码、语言生成、rollout 数量、训练步数？**
 
 ### 技术方案
 
-1. **Autonomous Task Synthesis**：
-   - **Tutorial → Task**：从 TongUI 的网络教程中自动提取可验证的 GUI 任务：(initial_state, instruction, success_criterion)
-   - **Exploration → Task**：Agent 自由探索 GUI 环境，记录有趣的状态转换，反向生成 "能否从 state A 达到 state B" 的任务
-   - **Compositional Task Generation**：将简单任务组合成复杂任务（先打开 Chrome，然后搜索 X，再将结果保存到文件）
+1. **实验矩阵设计**：
+   - **模型维度**：VLM size（2B, 7B, 14B, 32B）× 视觉编码器 size × 语言模型 size
+   - **训练维度**：rollout 数量 × rollout 长度 × batch size × 训练步数
+   - **视觉维度**：输入分辨率 × visual token budget × 动态分辨率 vs. 固定
+   - **任务维度**：pure visual QA → visual reasoning → GUI interaction → multi-turn agent
 
-2. **Automated Verification**：
-   - Screenshot comparison: 利用 VLM 判断最终截图是否满足任务要求
-   - State diffing: 对比文件系统、浏览器状态等 programmatic 指标
-   - Self-verify: Agent 自己用另一个 prompt 角色验证任务是否完成
+2. **IsoCompute 分析**：
+   - 固定总 FLOPs 预算，扫描所有配置维度
+   - 找到每个 FLOPs 级别的最优配置
+   - 拟合 scaling law：Performance = f(N_model, N_visual, N_rollout, N_train, ...)
 
-3. **Curriculum via Difficulty Estimation**：
-   - 根据 agent 当前的成功率动态调整任务难度
-   - 借鉴 DART 的 performance-aware task rollout，但应用于任务发现层面
-   - 优先生成 agent "刚好做不到" 的任务（Zone of Proximal Development）
+3. **关键假设检验**：
+   - H1：视觉分辨率存在 "甜蜜点"——过高过低都不好（类比文本 context length）
+   - H2：多模态 RL 的 rollout 效率低于纯文本 RL（因为视觉编码开销）→ 意味着需要更多 rollout 才能达到相同效果
+   - H3：RL 对视觉编码器的影响远小于对语言模型的影响 → 可能可以冻结视觉编码器降低成本
+   - H4：multi-turn 多模态 RL 的 scaling 行为与 single-turn 有质的不同
 
-4. **OpenClaw-Style Online Learning**：
-   - 整个 task synthesis → rollout → reward → training 流水线全异步运行
-   - Task synthesizer 持续产出新任务，environment cluster 持续执行
-   - Agent 的失败轨迹反馈给 task synthesizer，生成针对性的练习任务
+4. **实践指南输出**：
+   - "Given X FLOPs, use these hyperparameters for optimal VLM RL training"
+   - 可视化：不同预算下各维度的 allocation 建议
+   - 工具：开源一个 auto-configurator
 
-### 创新点
-- 打破 "固定 benchmark 训练" 的范式，实现开放式持续学习
-- 自主任务发现 + 自主验证 = 无人工标注的 RL 训练
-- Curriculum 从 task-level（DART）扩展到 task-synthesis-level
-- 利用 TongUI 的数据管线 + OpenClaw 的训练管线，形成闭环
+### 为什么能中顶会
+- **填补空白**：文本 RL scaling law 刚出来，多模态版本是自然且重要的下一步
+- **高实用价值**：所有做多模态 RL 的团队都需要这个指南
+- **需要大规模计算**：这类 scaling 工作天然需要大量计算资源（与你组资源优势匹配）
+- **容易出有影响力的发现**：几乎可以肯定会发现一些反直觉的 scaling 行为
 
-### 实验设计
-- 对比：固定任务集 RL vs. 自主发现任务 RL vs. 混合
-- 评估泛化性：在训练中从未见过的应用和任务类型上测试
-- 分析：自动生成的任务质量、多样性、难度分布
-- 展示 scaling law：任务数量 vs. agent 能力
+### 目标会议：ICML / NeurIPS（经验性贡献，但影响力大）
 
 ---
 
-## Idea 4: Adaptive Visual Grounding via RL — 动态分辨率 GUI Agent
+## Idea 4: Self-Play Verification for Multimodal RL — 视觉推理的自对弈验证
 
-### 核心动机
+### 核心洞察
 
-Chain-of-Focus 展示了通过 RL 训练 VLM 自适应搜索和缩放关键图像区域的能力。但 Chain-of-Focus 只解决了静态图像理解问题，没有应用于 **动态 GUI 交互** 场景。
+多模态 RL 的最大障碍是 **reward 从哪来**：
+- Verifiable reward 只适用于有标准答案的窄任务（数学、计数）
+- LLM-as-Judge / VLM-as-Judge 贵、慢、且本身有 hallucination
+- 人类标注不 scalable
 
-GUI Agent 面临一个独特挑战：**截图中 UI 元素的尺度差异极大**。一个 1920×1080 的桌面截图中，关键按钮可能只有 20×20 像素；表格中的具体数值可能需要放大才能辨认；而整体布局理解又需要全局视角。当前 GUI agent 通常以固定分辨率处理截图，这导致：
-- 小元素难以识别 → 点击坐标不准确
-- 高分辨率全图输入 → 视觉 token 过多，推理慢且贵
+数学推理领域有一个优雅的解法：**self-verification**（S2R 等工作）——模型自己验证自己的推理过程。但视觉领域的 self-verification 更难，因为视觉推理的 "正确性" 不像数学那样容易形式化。
+
+**核心想法：训练一对 Generator-Verifier VLM 进行自对弈——Generator 生成视觉推理链，Verifier 通过 grounding 每个推理步骤到图像来验证。两者通过 RL 共同提升。**
 
 ### 技术方案
 
-1. **扩展 GUI Agent 动作空间**：
-   - 标准动作：click(x,y), type(text), scroll(direction), ...
-   - **新增**：zoom_in(region), zoom_out(), switch_view(overview/detail)
-   - Agent 通过 RL 学习何时需要放大观察，何时需要全局概览
+1. **Generator-Verifier 架构**：
+   - **Generator**: 给定 (image, question)，生成推理链 + 答案
+   - **Verifier**: 给定 (image, question, reasoning_chain)，做 step-by-step 验证：
+     - 每步推理引用的视觉证据是否真实存在？（grounding 验证）
+     - 推理步骤之间的逻辑是否一致？（逻辑验证）
+     - 最终答案是否从推理链中可推导？（结论验证）
+   - 输出：每步的验证分数 + 整体判断 + 错误定位
 
-2. **Multi-Scale Visual Encoding**：
-   - 维护一个 "视觉注意力栈"：全局视图 + 当前聚焦区域
-   - Zoom-in 时：裁剪区域 → 高分辨率重编码 → 追加 visual tokens
-   - Zoom-out 时：返回全局视图
-   - 类似 Chain-of-Focus 的机制，但适配交互式 GUI 场景
+2. **Self-Play Training Loop**：
+   - Round 1: Generator 生成多条推理链（采样），Verifier 对每条打分
+   - Round 2: 用 Verifier 分数作为 RL reward 训练 Generator（GRPO）
+   - Round 3: 用 Generator 的多样化输出（正确的 + 有微妙错误的）训练 Verifier
+   - Iterate: 两者交替提升，类似 GAN 的对抗训练但更稳定（因为 Verifier 有 grounding anchor）
 
-3. **RL 训练策略**：
-   - **Reward Design**：
-     - 任务完成奖励（outcome reward）
-     - 效率惩罚：每次 zoom 操作有小的负奖励（鼓励必要时才 zoom）
-     - Grounding 准确性奖励：点击坐标与目标元素 IoU
-   - **Curriculum**：从需要 zoom 的任务（小按钮、密集表格）到不需要的任务
-   - 用 GRPO 训练，与 DART 框架集成
+3. **Grounding-Anchored Verification**：
+   - 关键创新：Verifier 不仅说 "这步对/错"，还必须**指出图像中的具体区域**作为证据
+   - 这使得 verification 本身变得可验证——可以检查 Verifier 指出的区域是否合理
+   - 类似 Ground-R1 的思路，但应用于 verification 而非 generation
 
-4. **Efficient Zoom via Region Proposal**：
-   - 训练一个轻量级 region proposal 模块（类似 OWL-ViT）
-   - 给出 "值得放大" 的候选区域
-   - Agent 从候选中选择或直接指定自定义区域
+4. **Bootstrapping from Easy to Hard**：
+   - 初始化：在有 ground truth 答案的简单 VQA 上训练 Verifier
+   - 逐步扩展到没有 GT 的开放式视觉推理
+   - Self-play 的稳定性通过 "easy task anchor" 保证——始终混入一定比例的可验证任务
 
-### 创新点
-- 将 Chain-of-Focus 的自适应视觉搜索范式从静态 VQA 扩展到动态 GUI 交互
-- 通过 RL 而非启发式规则学习 "何时放大、放大哪里"
-- Multi-scale visual encoding 平衡了精度和效率
-- 天然解决 GUI agent 的 grounding 精度问题
+### 为什么能中顶会
+- **解决核心痛点**：多模态 RL 的 reward 来源问题
+- **优雅的 formulation**：self-play + grounding anchor，既 scalable 又 grounded
+- **与当前热点呼应**：Self-verification (S2R) + Visual Grounding (ViGoRL) + Self-play (Vision-Zero) 的有机结合
+- **可展示涌现行为**：随着 self-play 轮次增加，Generator 学会更 "可验证" 的推理，Verifier 学会发现更 subtle 的错误
 
-### 实验设计
-- 重点评估 grounding 精度：ScreenSpot, ScreenSpot-Pro
-- 端到端任务评估：OSWorld（尤其是涉及小UI元素的 LibreOffice 任务）
-- 效率分析：visual token 数量 vs. 任务成功率的 Pareto 曲线
-- 消融：fixed high-res vs. fixed low-res vs. adaptive zoom
+### 目标会议：ICLR / NeurIPS
 
 ---
 
-## Idea 5: GUI-PRM — 面向 GUI Agent 的多模态过程奖励模型
+## Idea 5: Code-as-Action RL — 代码作为多模态 Agent 的统一动作空间
 
-### 核心动机
+### 核心洞察
 
-当前 GUI Agent RL 的奖励信号极度稀疏：只有最终的任务成功/失败。这导致：
-- 长序列任务（20-30步）的 credit assignment 极其困难
-- 一个最终失败的轨迹中，可能前 90% 的步骤都是正确的，但全部被惩罚
-- DART 的 experience pool 缓解了这个问题，但本质上仍依赖稀疏奖励
+当前多模态 Agent 的动作空间存在根本问题：
+- GUI Agent 输出 pixel-level actions（click(x,y), type(text)），每步只能做一个原子操作，长任务需要几十步
+- Tool-use Agent 输出 API calls，受限于预定义的工具集
+- Embodied Agent 输出 low-level motor commands
 
-OpenClaw-RL 使用 PRM 提供过程奖励，但其 PRM 主要处理文本交互。GUI 场景需要一个能理解 **视觉状态变化** 的多模态 PRM。
+**CodeDance（2025）展示了一个激进但有效的方向：让 VLM 生成可执行代码作为动作**，代码可以调用任意工具、组合多步操作、包含条件分支和循环。但 CodeDance 只用了有限的 RL（reward for balanced tool-calling），远未挖掘出这个范式的全部潜力。
 
-现有工作如 PROGRM（progress reward model）和 OPRL（online process reward learning）都是初步尝试，但：
-- PROGRM 只预测一个标量 "任务完成进度"，粒度不够
-- OPRL 从轨迹偏好中隐式学习 PRM，需要大量成对比较数据
-- 两者都未充分利用 GUI 状态的视觉信息
+**核心想法：将 "code as action" 作为多模态 Agent 的统一动作表示，用大规模 RL 训练 Agent 从视觉观察中直接生成可执行代码。代码执行结果天然提供 verifiable reward。**
 
 ### 技术方案
 
-1. **多维度过程奖励**：
-   - **Progress Score**：当前步骤完成了多少比例的任务 (0-1)
-   - **Reversibility Score**：当前动作是否可逆（不可逆的错误代价更大）
-   - **Alignment Score**：当前动作与任务意图的对齐程度
-   - **Efficiency Score**：是否存在更短路径达到相同状态
+1. **统一的 Code Action Space**：
+   - GUI 任务：生成 pyautogui / accessibility API 代码
+   - Tool-use 任务：生成 Python 代码调用 API
+   - 视觉推理：生成代码操作图像（crop, measure, compare）
+   - 数据分析：生成代码处理和可视化数据
+   - 统一接口：`execute(code_string) → (stdout, stderr, state_change)`
 
-2. **多模态 PRM 架构**：
-   - 输入：(task_instruction, screenshot_t, action_t, screenshot_{t+1})
-   - 编码器：基于 Qwen2.5-VL 的视觉-语言编码
-   - 输出头：四个维度的标量分数
-   - 额外输出：自然语言解释（"这一步正确地打开了设置菜单，任务进度从 20% 到 35%"）
+2. **Visual-Code RL Training**：
+   - Reward = execution_success × task_completion + code_quality_bonus
+   - **Execution Feedback as Free Reward**：代码执行的成功/失败、runtime error、输出结果都是天然的 verifiable signal
+   - **Hindsight Code Revision**：执行失败后，将 error message 作为 OpenClaw-style 的 directive signal
+   - 用 GRPO/PPO 训练 VLM 在给定视觉输入下生成更好的代码
 
-3. **PRM 训练数据构造**：
-   - **自动标注**：利用 TongUI/DART 的历史轨迹，通过 outcome + trajectory analysis 反向标注每步的 progress
-   - **对比学习**：同一任务的成功 vs. 失败轨迹在分叉点的对比
-   - **VLM-as-Judge**：用强大的 VLM（如 GPT-4o/Claude）对每步进行评估，然后蒸馏到轻量 PRM
-   - **Online Self-Labeling**：类似 OPRL，PRM 在训练过程中持续从新轨迹中学习
+3. **Code Abstraction via RL**：
+   - RL 天然鼓励 Agent 学习 "写更短更通用的代码"（efficiency reward）
+   - 期望涌现行为：Agent 自动学会定义辅助函数、复用代码片段、处理异常
+   - 长期目标：Agent 构建自己的 "代码工具库"，类似人类程序员的 utility functions
 
-4. **与 RL 训练集成**：
-   - 将 PRM 分数作为 dense reward 用于 GRPO training
-   - PRM 和 policy 在 OpenClaw/DART 的异步框架中同步更新
-   - 用 PRM 的 reversibility score 指导 exploration：优先探索可逆动作
+4. **Multi-Modal Code Understanding**：
+   - 输入：screenshot + task description
+   - Agent 分析截图 → 推理需要的操作 → 生成代码 → 执行 → 观察结果 → 迭代
+   - 每次代码执行产生新的视觉状态，形成 multi-turn code-as-action RL loop
 
-### 创新点
-- 首个面向 GUI 的多维度多模态过程奖励模型
-- 从 "进度/可逆性/对齐度/效率" 四个维度提供丰富的过程奖励
-- 自标注 + 对比学习 + VLM-as-Judge 的数据构造管线
-- PRM 和 policy 的 co-evolution 训练
+### 为什么能中顶会
+- **范式转变**：从 "predicting atomic actions" 到 "generating executable programs"，动作空间的表达能力质的飞跃
+- **天然的 verifiable reward**：代码执行是最好的验证器——运行成功/失败、输出正确/错误
+- **组合泛化**：代码天然支持组合——训练中学到的子程序可以在新任务中自由组合
+- **实用价值**：用代码操作 GUI 比 pixel-level action 更稳定、可复现、可 debug
 
-### 实验设计
-- 对比：outcome reward only vs. single-dim PRM (PROGRM) vs. multi-dim PRM
-- 重点分析长序列任务（>15步）的学习效率提升
-- PRM 本身的评估：step-level reward accuracy vs. human annotation
-- Scaling：PRM size (1B-7B) vs. reward quality vs. downstream RL performance
+### 目标会议：NeurIPS / ICML
 
 ---
 
-## Idea 6: Multi-Platform Meta-RL via OpenClaw — 跨平台快速适应的 GUI Agent
+## Idea 6: Hindsight Relabeling for Multimodal Long-Horizon RL
 
-### 核心动机
+### 核心洞察
 
-现有 GUI Agent 通常在多个平台的混合数据上联合训练（Windows + macOS + Linux + Android + Web），但这种 "一锅烩" 的训练方式忽略了平台间的差异性：
-- UI 设计范式不同（macOS 的菜单栏 vs. Windows 的任务栏）
-- 交互模式不同（移动端的滑动 vs. 桌面端的右键菜单）
-- 视觉风格不同（Material Design vs. Human Interface Guidelines）
+长序列多模态任务（GUI 操作 20-30 步、复杂推理 10+ 轮）中，credit assignment 是最核心的难题。现有方案：
+- HiPER：层次化分解，但需要预定义的子任务结构
+- HCAPO：用 LLM 做 hindsight critic，但只处理文本
+- Delta Belief-RL：用 token probability 变化做内在奖励，但缺乏视觉语义
 
-GUI-Owl-1.5 提出了 MRPO 来处理多平台冲突，但其方法是设计特殊的 RL 算法。更本质的问题是：**能否让 agent 快速适应新平台/新应用，而非为每个平台训练专用模型？**
+**关键洞察：多模态 Agent 的轨迹中蕴含了丰富的 "后见之明" 信息——通过对比最终成功/失败的轨迹，可以自动发现每一步的关键性，并用 VLM 将这种后见之明 "蒸馏" 为 step-level reward。**
+
+这与 HER（Hindsight Experience Replay）的精神一致，但完全不同于 HER 的技术实现——HER 改变目标来让失败轨迹变成"成功"的；**我们的方法是用 VLM 的后见之明能力来做 fine-grained credit assignment**。
 
 ### 技术方案
 
-1. **Meta-RL Formulation**：
-   - 将每个 (platform, application) 视为一个 "task distribution"
-   - Meta-training：在多个 platform-application 组合上训练
-   - Meta-testing：在新的 platform 或新的 application 上 few-shot 适应
-   - 目标：学习一个好的 initialization，能在少量交互后快速适应
+1. **Visual Trajectory Comparison**：
+   - 对同一任务收集 N 条轨迹（成功的 + 失败的）
+   - 用 VLM 分析轨迹对比：找到 "决定性分叉点"（divergence point）
+   - 在分叉点之前的步骤都应获得正奖励（无论最终成功失败）
+   - 分叉点处的动作差异直接反映了 "该做什么"
 
-2. **Platform-Aware Architecture**：
-   - Shared visual backbone：理解通用 UI 元素（按钮、输入框、菜单等）
-   - Platform adapter：轻量级的 platform-specific 模块（LoRA/Adapter）
-   - 训练时：为每个平台维护独立的 adapter
-   - 适应时：用新平台的少量轨迹快速微调 adapter，backbone 冻结
+2. **VLM Hindsight Critic**：
+   - 给 VLM 完整的轨迹信息（包括最终结果），让它 "事后诸葛亮" 地评估每一步
+   - Prompt: "给定任务 X，以下是完整的操作序列和截图。事后来看，第 t 步的操作是好是坏？为什么？如果重来应该怎么做？"
+   - 将 VLM 的评估蒸馏为 step-level scalar reward
+   - 关键：VLM 在 "看到结局后" 的评估比实时评估准确得多
 
-3. **OpenClaw-Style Online Adaptation**：
-   - 利用 OpenClaw 的异步 online learning 能力
-   - Agent 部署到新平台后，每次交互都是 "学习机会"
-   - 用 OPD 从用户的纠正反馈中快速适应平台特性
-   - 用 PRM 从环境状态变化中自动评估动作质量
+3. **Counterfactual Visual Reasoning**：
+   - 更进一步：让 VLM 做 **反事实推理**——"如果第 t 步做了 action B 而非 action A，后续会怎样？"
+   - 不需要真正执行反事实（太贵），而是让 VLM 根据视觉理解做推理
+   - 反事实与实际的差异 → step-level advantage estimation
 
-4. **Cross-Platform Knowledge Transfer**：
-   - 建立 UI 元素的跨平台语义映射（macOS 的 "Finder" ≈ Windows 的 "File Explorer"）
-   - 在一个平台上学到的操作策略迁移到另一个平台
-   - 用 contrastive learning 对齐不同平台相似功能的表征
+4. **Progressive Credit Sharpening**：
+   - 初期：粗粒度的 hindsight credit（"前半段好、后半段差"）
+   - 随着训练进行：Agent 的行为方差减小，VLM critic 可以做更 fine-grained 的评估
+   - 最终：step-level 甚至 token-level 的精确 credit assignment
 
-### 创新点
-- GUI Agent 领域首个系统性的 meta-RL + 快速适应框架
-- Platform adapter 架构平衡了共享知识和平台特异性
-- OpenClaw 的 online learning 能力天然适配 "部署即适应" 的场景
-- Cross-platform semantic alignment 实现知识迁移
+### 为什么能中顶会
+- **解决 fundamental problem**：长序列 RL 的 credit assignment 是 RL 社区几十年的核心问题
+- **多模态 novelty**：利用 VLM 的视觉理解做 hindsight reasoning，这是纯文本 RL 做不到的
+- **轨迹对比 + 反事实推理**：两个强有力的信号来源，比简单的 outcome reward 丰富得多
+- **通用性**：不限于 GUI，任何多模态 Agent 任务都适用
 
-### 实验设计
-- 评估 few-shot 适应能力：在 5/10/20 条轨迹后的性能
-- Leave-one-platform-out：训练时去掉一个平台，测试适应速度
-- Leave-one-app-out：训练时去掉一个应用，测试泛化和适应
-- 对比：joint training vs. platform-specific training vs. meta-RL
+### 目标会议：ICML / NeurIPS
 
 ---
 
-## 综合对比与建议
+## Idea 7: RL-Driven Multimodal Reward Model — 用 RL 训练 RM 而非用 RM 训练 RL
 
-| Idea | 新颖度 | 与组内工作衔接 | 技术可行性 | 预期 Impact | 推荐优先级 |
-|------|--------|---------------|-----------|-------------|-----------|
-| 1. Visual OPD for GUI | ★★★★☆ | DART + OpenClaw 直接衔接 | ★★★★★ | ★★★★☆ | **最推荐** |
-| 2. GUI World Model RL | ★★★★★ | 与 DART 系统设计衔接 | ★★★☆☆ | ★★★★★ | 高风险高回报 |
-| 3. Self-Evolving Agent | ★★★★☆ | TongUI + DART + OpenClaw | ★★★★☆ | ★★★★★ | **强烈推荐** |
-| 4. Adaptive Zoom RL | ★★★★☆ | Chain-of-Focus 直接延伸 | ★★★★☆ | ★★★☆☆ | 适合短期项目 |
-| 5. GUI-PRM | ★★★☆☆ | DART reward design 延伸 | ★★★★★ | ★★★★☆ | **最推荐** |
-| 6. Cross-Platform Meta-RL | ★★★★☆ | TongUI 跨平台 + OpenClaw | ★★★☆☆ | ★★★★☆ | 中期项目 |
+### 核心洞察
 
-### 最强组合推荐
+当前的多模态 RL pipeline 是单向的：先训练 Reward Model（RM），再用 RM 训练 Policy。但这引入了一个根本问题——**reward hacking**：policy 学会了讨好 RM 的弱点，而非真正完成任务。
 
-**Idea 5 (GUI-PRM) + Idea 1 (Visual OPD)** 可以作为一个完整故事：
-- GUI-PRM 提供 evaluative signal（多维度过程奖励）
-- Visual OPD 提供 directive signal（token 级别的 "应该怎么做"）
-- 这与 OpenClaw-RL 的双信号（evaluative + directive）框架完美对齐
-- 但完全针对 GUI 场景做了多模态的深度适配
-- 工作量适中，风险可控，预期效果显著
+Anthropic 2026 年的研究表明，reward hacking 不仅降低性能，还会引发 **广义错位（broad misalignment）**——在一个领域学会 hack 后，这种行为会迁移到其他领域。
 
-**Idea 3 (Self-Evolving)** 可以作为独立的系统工作，展示 GUI Agent 自主进化的可能性，与组内 TongUI 数据管线和 DART 训练框架无缝衔接。
+**反转视角：如果 Reward Model 和 Policy 不是单向的 teacher-student，而是双向共同进化呢？**
+
+### 技术方案
+
+1. **Co-Evolutionary Training Framework**：
+   - **Policy** 和 **Reward Model** 交替训练，形成一个博弈均衡：
+   - Policy tries to maximize reward → RM updates to be harder to hack → Policy adapts → ...
+   - 类似 GAN，但 RM 不是 discriminator——RM 要学会给真正好的行为高分，给 hack 行为低分
+
+2. **Adversarial Reward Probing**：
+   - 训练一个 "adversarial policy" 专门寻找 RM 的弱点（reward hacking 行为）
+   - 将发现的 hack 样本加入 RM 的训练数据，让 RM 对这些 hack 产生免疫力
+   - 类似 red-teaming，但自动化且持续进行
+
+3. **Multi-Signal Reward Anchoring**：
+   - RM 不只依赖单一信号，而是同时从多个 **锚点** 获取监督：
+     - Verifiable reward（可验证的部分，作为 ground truth anchor）
+     - Human preference（少量人类标注，作为 calibration anchor）
+     - Execution feedback（代码运行/环境反馈，作为 functional anchor）
+     - Self-consistency（多次采样的一致性，作为 statistical anchor）
+   - 任何单一信号被 hack 时，其他 anchor 提供制约
+
+4. **Multimodal-Specific Anti-Hacking**：
+   - VLM reward hacking 的独特形式：hallucination-based hacking（编造视觉证据骗过文本 RM）
+   - 设计 visual grounding constraint：RM 的评估必须基于可追溯的视觉证据
+   - 如果 policy 生成了无法 grounding 到图像的推理，RM 应给予低分
+
+### 为什么能中顶会
+- **Anthropic 的研究证明了 reward hacking 的严重性**——这是 2026 最热的 safety topic 之一
+- **从 "防御" 到 "共进化"**：不是修补 RM 的弱点，而是设计让 RM 和 Policy 互相促进的机制
+- **多模态视角**：Visual hallucination + reward hacking 的交叉是全新的问题
+- **实用价值**：任何做多模态 RL 的工作都面临 reward hacking，本文提供系统性方案
+
+### 目标会议：NeurIPS / ICLR
+
+---
+
+## 综合对比与策略建议
+
+| Idea | 新颖度 | 可行性 | Impact | 风险 | 最佳投稿 | 计算需求 |
+|------|--------|--------|--------|------|---------|---------|
+| 1. Visual RLVR | ★★★★★ | ★★★★☆ | ★★★★★ | 中 | NeurIPS/ICML | 中 |
+| 2. Adaptive Compute | ★★★★☆ | ★★★★☆ | ★★★★☆ | 低 | ICLR/NeurIPS | 中 |
+| 3. MM RL Scaling Laws | ★★★★★ | ★★★★★ | ★★★★★ | 低 | ICML/NeurIPS | **极高** |
+| 4. Self-Play Verify | ★★★★★ | ★★★☆☆ | ★★★★★ | 高 | ICLR/NeurIPS | 高 |
+| 5. Code-as-Action RL | ★★★★☆ | ★★★★☆ | ★★★★★ | 中 | NeurIPS/ICML | 中 |
+| 6. Hindsight Credit | ★★★★☆ | ★★★★★ | ★★★★☆ | 低 | ICML/NeurIPS | 中 |
+| 7. Co-Evo RM | ★★★★★ | ★★★☆☆ | ★★★★★ | 高 | NeurIPS/ICLR | 高 |
+
+### 推荐策略
+
+**稳中求胜（高可行性 + 高 Impact）**：
+- **Idea 1 (Visual RLVR)** + **Idea 6 (Hindsight Credit)** 组合 → 一篇完整的 "视觉领域的 RL 训练基础设施" 论文
+
+**利用计算资源优势**：
+- **Idea 3 (Scaling Laws)** 是最适合 "计算资源充足" 的组的工作，且 empirical scaling 论文在 ICML/NeurIPS 上有很好的接收率
+
+**追求高风险 Oral**：
+- **Idea 4 (Self-Play Verify)** 或 **Idea 7 (Co-Evo RM)** 如果做出来，都是有 Oral 潜力的工作
+
+**范式级创新**：
+- **Idea 5 (Code-as-Action)** 提出了一个全新的动作表示范式，如果实验效果好，narrative 非常强
